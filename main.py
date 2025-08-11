@@ -1,9 +1,7 @@
 import torch
 from transformer_lens import HookedTransformer
 from IOI_Dataset import IOIDatasetBuilder
-from CircuitDiscovery import CircuitDiscovery
-from visualization import Visualization
-
+from ActivationPatching import ActivationPatching
 
 def run_circuit_discovery():
 
@@ -12,29 +10,17 @@ def run_circuit_discovery():
 
     print("Building IOI dataset...")
     dataset_builder = IOIDatasetBuilder(model)
-    dataset = dataset_builder.build_dataset(num_samples=100)
+    dataset = dataset_builder.build_dataset(num_samples=10)
 
     print(f"Generated {len(dataset)} IOI examples")
     print("Sample examples:")
-    for i in range(3):
-        ex = dataset[i]
-        print(f"  Clean: {ex.clean_prompt} -> {ex.correct_answer}")
-        print(f"  Corrupted: {ex.corrupted_prompt} -> {ex.incorrect_answer}")
-        print()
+    ex = dataset[0]
+    print(f"  Clean: {ex.clean_prompt} -> {ex.correct_answer}")
+    print(f"  Corrupted: {ex.corrupted_prompt} -> {ex.incorrect_answer}")
 
-    print("Starting circuit discovery...")
-    circuit_discovery = CircuitDiscovery(model, dataset)
-    results = circuit_discovery.run_full_analysis()
-
-    print("Creating visualizations...")
-    visualization = Visualization(model, dataset)
-    visualization.visualize_head_importance(results)
-    visualization.visualize_circuit_graph(results)
-
-    print("Circuit discovery complete!")
-#
-    #return model, dataset, circuit_discovery, results
-
+    # Start circuit discovery
+    circuit_discovery = ActivationPatching(model, dataset)
+    results = circuit_discovery.run_circuit_discovery()
 
 
 if __name__ == "__main__":

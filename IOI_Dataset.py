@@ -65,13 +65,13 @@ class IOIDatasetBuilder:
         corrupted_prompt = f"When {subject} and {corrupted_indirect} went to the store, {subject} {verb} {obj} to"
 
         # Tokenize the prompts and the correct/incorrect answers
-        clean_tokens = self.model.to_tokens(clean_prompt, prepend_bos=True)
-        corrupted_tokens = self.model.to_tokens(corrupted_prompt, prepend_bos=True)
+        clean_tokens = self.model.to_tokens(clean_prompt).squeeze(0)  # Remove batch dimension
+        corrupted_tokens = self.model.to_tokens(corrupted_prompt).squeeze(0)  # Remove batch dimension
         correct_token = self.model.to_single_token(indirect_object)
         incorrect_token = self.model.to_single_token(corrupted_indirect)
 
         # Find answer position (last token position)
-        answer_token_pos = clean_tokens.shape[1] - 1
+        answer_token_pos = clean_tokens.shape[0] - 1
 
         return IOIExample(
             clean_prompt=clean_prompt,
@@ -90,9 +90,9 @@ class IOIDatasetBuilder:
 
     def pad_sequences(self, tokens: List) -> torch.Tensor:
         """Pad each token to the maximum token length in the dataset"""
-        max_length = max(token.shape[1] for token in tokens)
+        max_length = max(token.shape[0] for token in tokens)
         padded_tokens = [
-            F.pad(t, (0, max_length - t.shape[1]))
+            F.pad(t, (0, max_length - t.shape[0]))
             for t in tokens
         ]
         # Convert to tensor
