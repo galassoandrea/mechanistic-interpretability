@@ -18,4 +18,4 @@ def kl_divergence(clean_logits, corrupted_logits, dim: int = -1):
     # KL(P || Q) = sum P * (logP - logQ)
     kl = torch.sum(probs_a * (log_probs_a - log_probs_b), dim=dim)
 
-    return kl
+    return kl.mean()

@@ -1,13 +1,10 @@
 import torch
-import torch.nn.functional as F
-from dataclasses import dataclass, field
-from typing import Dict, List, Tuple, Optional, Set, Any, Callable
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Set, Any, Callable
 from collections import defaultdict, deque
 from utilities.evaluation import kl_divergence
-from transformer_lens import HookedTransformer
 import numpy as np
 from tqdm import tqdm
-import copy
 
 
 @dataclass
@@ -18,10 +15,9 @@ class Node:
     component_type: str  # "attention", "mlp", "embedding", "resid", etc.
     full_activation: str
     head_idx: Optional[int] = None  # For attention heads
-    position: Optional[int] = None  # For position-specific nodes
 
     def __hash__(self):
-        return hash((self.name, self.layer, self.component_type, self.head_idx, self.position))
+        return hash((self.name, self.layer, self.component_type, self.head_idx))
 
     def __eq__(self, other):
         if not isinstance(other, Node):
@@ -29,8 +25,7 @@ class Node:
         return (self.name == other.name and
                 self.layer == other.layer and
                 self.component_type == other.component_type and
-                self.head_idx == other.head_idx and
-                self.position == other.position)
+                self.head_idx == other.head_idx)
 
     def __repr__(self):
         return f"Node({self.name})"
@@ -41,7 +36,6 @@ class Edge:
     """Represents an edge in the computational graph."""
     sender: Node  # Source node
     receiver: Node  # Destination node
-    weight: float = 1.0  # Optional edge weight/importance
 
     def __hash__(self):
         return hash((self.sender, self.receiver))
@@ -125,7 +119,7 @@ class ACDC:
     for finding minimal circuits responsible for specific tasks.
     """
 
-    def __init__(self, model, dataset, task_name: str = "IOI", threshold: float = 0.01):
+    def __init__(self, model, dataset, task_name: str = "IOI", threshold: float = 0.05):
 
         self.model = model
         self.dataset = dataset
@@ -162,6 +156,7 @@ class ACDC:
         embed_node = Node(name="embed", layer=0, component_type="embedding", full_activation="hook_embed")
         graph.add_node(embed_node)
         nodes_by_layer[0]["embedding"] = embed_node
+        n_heads = self.model.cfg.n_heads
 
         # Add all other nodes (attention, MLP, residual connections)
         for full_activation in model_components:
@@ -169,23 +164,26 @@ class ACDC:
                 if "attn" in full_activation:
                     # Attention nodes
                     layer = int(full_activation.split('.')[1]) + 1
-                    act_name = full_activation.split('_', 1)[1]
-                    node = Node(
-                        name=f"L{layer}.{act_name}",
-                        layer=layer,
-                        component_type="attention",
-                        full_activation=full_activation
-                    )
-                    graph.add_node(node)
-                    if "attention" not in nodes_by_layer[layer]:
-                        nodes_by_layer[layer]["attention"] = []
-                    nodes_by_layer[layer]["attention"].append(node)
+                    act_name = full_activation.rsplit(".", 1)[1]
+                    if act_name == "hook_z":
+                        for head_idx in range(n_heads):
+                            node = Node(
+                                name=act_name,
+                                layer=layer,
+                                component_type="attention",
+                                head_idx=head_idx,
+                                full_activation=full_activation
+                            )
+                            graph.add_node(node)
+                            if "attention" not in nodes_by_layer[layer]:
+                                nodes_by_layer[layer]["attention"] = []
+                            nodes_by_layer[layer]["attention"].append(node)
                 elif "mlp" in full_activation:
                     # MLP nodes
                     layer = int(full_activation.split('.')[1]) + 1
-                    act_name = full_activation.split('_', 1)[1]
+                    act_name = full_activation.rsplit(".", 1)[1]
                     node = Node(
-                        name=f"L{layer}.{act_name}",
+                        name=act_name,
                         layer=layer,
                         component_type="mlp",
                         full_activation=full_activation
@@ -197,9 +195,9 @@ class ACDC:
                 elif "resid" in full_activation:
                     # Residual nodes
                     layer = int(full_activation.split('.')[1]) + 1
-                    act_name = full_activation.split('_', 1)[1]
+                    act_name = full_activation.rsplit(".", 1)[1]
                     node = Node(
-                        name=f"L{layer}.{act_name}",
+                        name=act_name,
                         layer=layer,
                         component_type="residual",
                         full_activation=full_activation
@@ -212,7 +210,7 @@ class ACDC:
         # Handle embedding to layer 1 connection
         if 0 in nodes_by_layer and 1 in nodes_by_layer:
             embed_node = nodes_by_layer[0]["embedding"]
-            layer_1_resid_pre = nodes_by_layer[1].get("resid_pre")
+            layer_1_resid_pre = nodes_by_layer[1].get("hook_resid_pre")
             if layer_1_resid_pre:
                 edge = Edge(sender=embed_node, receiver=layer_1_resid_pre)
                 graph.add_edge(edge)
@@ -222,17 +220,17 @@ class ACDC:
 
             # Previous layer's resid_post -> current layer's resid_pre
             if layer > 1:  # Skip for layer 1 (handled by embedding)
-                prev_resid_post = nodes_by_layer[layer - 1].get("resid_post")
-                curr_resid_pre = current_layer_nodes.get("resid_pre")
+                prev_resid_post = nodes_by_layer[layer - 1].get("hook_resid_post")
+                curr_resid_pre = current_layer_nodes.get("hook_resid_pre")
                 if prev_resid_post and curr_resid_pre:
                     edge = Edge(sender=prev_resid_post, receiver=curr_resid_pre)
                     graph.add_edge(edge)
 
             # resid_pre -> attention (parallel path)
-            resid_pre = current_layer_nodes.get("resid_pre")
+            resid_pre = current_layer_nodes.get("hook_resid_pre")
             if resid_pre and "attention" in current_layer_nodes:
-                for attn_node in current_layer_nodes["attention"]:
-                    edge = Edge(sender=resid_pre, receiver=attn_node)
+                for attn_head_node in current_layer_nodes["attention"]:
+                    edge = Edge(sender=resid_pre, receiver=attn_head_node)
                     graph.add_edge(edge)
 
             # resid_pre -> MLP (parallel path)
@@ -242,19 +240,18 @@ class ACDC:
                     graph.add_edge(edge)
 
             # attention and MLP outputs -> resid_post (parallel combination)
-            resid_post = current_layer_nodes.get("resid_post")
+            resid_post = current_layer_nodes.get("hook_resid_post")
             if resid_post:
                 # resid_pre -> resid_post
                 if resid_pre:
                     edge = Edge(sender=resid_pre, receiver=resid_post)
                     graph.add_edge(edge)
 
-                # Attention output -> resid_post
+                # Attention heads output -> resid_post
                 if "attention" in current_layer_nodes:
-                    for attn_node in current_layer_nodes["attention"]:
-                        # Connect attention output nodes to resid_post
-                        if self.is_output_activation(attn_node.full_activation, "attention"):
-                            edge = Edge(sender=attn_node, receiver=resid_post)
+                    for attn_head_node in current_layer_nodes["attention"]:
+                        if self.is_output_activation(attn_head_node.full_activation, "attention"):
+                            edge = Edge(sender=attn_head_node, receiver=resid_post)
                             graph.add_edge(edge)
 
                 # MLP output -> resid_post
@@ -269,68 +266,169 @@ class ACDC:
 
     def is_output_activation(self, full_activation, component_type):
         """ Determine if an activation is an output activation for a given component type."""
-        if component_type == "attention":
-            output_patterns = [
-                "attn.hook_result",  # Final attention output
-                "attn.hook_z",  # Pre-output projection
-            ]
-            return any(pattern in full_activation for pattern in output_patterns)
+        if component_type == "attention" and "attn.hook_z" in full_activation:
+            return True
 
-        elif component_type == "mlp":
-            output_patterns = [
-                "mlp.hook_post",  # Final MLP output
-                "mlp.hook_out",  # Alternative naming
-            ]
-            return any(pattern in full_activation for pattern in output_patterns)
+        elif component_type == "mlp" and "hook_mlp_out" in full_activation:
+            return True
 
         return False
 
 
-    #def discover_circuit(self):
-    #    print(f"Building computational graph for {self.task_name} task...")
-    #    self.full_graph = self.build_computational_graph(n_layers, n_heads)
-    #    self.circuit = self.full_graph.copy()
-    #    ordered_nodes = self.circuit.topological_sort()
-#
-    #    print(f"Total nodes: {len(ordered_nodes)}")
-    #    print(f"Total edges: {len(self.circuit.edges)}")
-    #    print(f"Starting edge pruning with threshold: {self.threshold}")
-#
-    #    # Collect reference outputs
-    #    clean_logits = []
-    #    for example in tqdm(self.dataset, desc="Collecting reference outputs"):
-    #        inputs = example.clean_prompt
-    #        logits = self.model(inputs, return_type="logits")
-    #        clean_logits.append(logits)
-#
-    #    # Iterate through nodes and prune edges
-    #    edges_removed = 0
-    #    total_edges_evaluated = 0
-#
-    #    for receiver in tqdm(ordered_nodes, desc="Pruning edges"):
-    #        senders = self.circuit.get_senders(receiver)
-    #        for sender in senders:
-    #            edge = Edge(sender, receiver)
-#
-    #            # Temporarily remove the edge
-    #            kl_divs = []
-    #            for i, example in enumerate(self.dataset):
-    #                clean_prompt = example.clean_prompt
-#
-    #                ablated_logits = self.model.run_with_hooks(
-    #                    clean_prompt,
-    #                )
-    #                kl_divs.append(kl_divergence(clean_logits[i], ablated_logits))
-#
-    #            avg_kl_div = np.mean(kl_divs)
-    #            total_edges_evaluated += 1
-    #            if avg_kl_div < self.threshold:
-    #                self.circuit.remove_edge(edge)
-    #                edges_removed += 1
-#
-    #    print(f"\nCircuit discovery complete!")
-    #    print(f"Edges evaluated: {total_edges_evaluated}")
-    #    print(f"Edges removed: {edges_removed}")
-    #    print(f"Final circuit edges: {len(self.circuit.edges)}")
-#
-    #    return self.circuit
+    def discover_circuit(self):
+        """ Main method to perform circuit discovery using edge pruning. """
+
+        print(f"Building computational graph for {self.task_name} task...")
+        self.full_graph = self.build_computational_graph()
+        self.circuit = self.full_graph.copy()
+        ordered_nodes = self.circuit.topological_sort()
+
+        print(f"Total nodes: {len(ordered_nodes)}")
+        print(f"Total edges: {len(self.circuit.edges)}")
+        print(f"Starting edge pruning with threshold: {self.threshold}")
+
+        # Collect reference outputs
+        clean_logits = []
+        caches = []
+        for example in tqdm(self.dataset, desc="Collecting reference outputs"):
+            inputs = example.clean_tokens
+            with torch.no_grad():
+                logits, cache = self.model.run_with_cache(inputs, return_type="logits")
+            clean_logits.append(logits)
+            caches.append(cache)
+
+        # Iterate through nodes and prune edges
+        edges_removed = 0
+        total_edges_evaluated = 0
+        kl_score = 0.0
+        ablated_edges = []
+
+        for receiver in tqdm(ordered_nodes, desc="Pruning edges"):
+            if receiver.name == "hook_resid_post":
+                senders = self.full_graph.get_senders(receiver)
+                for sender in senders:
+                    if sender.name in ["hook_resid_pre", "hook_mlp_out"]:
+                        edge = Edge(sender, receiver)
+                        print(f"Evaluating edge: L{sender.layer}-{sender.name.split('_', 1)[1]} -> L{receiver.layer}-{receiver.name.split('_', 1)[1]}")
+                        # Temporarily remove the edge
+                        kl_divs = []
+                        for i, example in enumerate(self.dataset):
+                            clean_tokens = example.clean_tokens
+                            # Ablate the edge by zeroing out the sender's contribution (not the whole activation) only on receiver
+                            ablated_logits = self.run_with_edge_ablation(clean_tokens, edge, caches[i], ablated_edges)
+                            kl_div = kl_divergence(clean_logits[i], ablated_logits)
+                            kl_divs.append(kl_div.item())
+                        avg_kl_div = np.mean(kl_divs)
+                        total_edges_evaluated += 1
+                        print(f"Avg KL Divergence = {avg_kl_div:.6f}")
+                        if avg_kl_div < self.threshold:
+                            self.circuit.remove_edge(edge)
+                            edges_removed += 1
+                            ablated_edges.append(edge)
+                            print(f"Edge removed.")
+                    elif sender.name == "hook_z":
+                        edge = Edge(sender, receiver)
+                        print(f"Evaluating edge: L{sender.layer}-Head{sender.head_idx} -> L{receiver.layer}-{receiver.name.split('_', 1)[1]}")
+                        kl_divs = []
+                        for i, example in enumerate(self.dataset):
+                            clean_tokens = example.clean_tokens
+                            ablated_logits = self.run_with_edge_ablation(clean_tokens, edge, caches[i], ablated_edges)
+                            kl_div = kl_divergence(clean_logits[i], ablated_logits)
+                            kl_divs.append(kl_div.item())
+                        avg_kl_div = np.mean(kl_divs)
+                        total_edges_evaluated += 1
+                        print(f"Avg KL Divergence = {avg_kl_div:.6f}")
+                        if avg_kl_div < self.threshold:
+                            self.circuit.remove_edge(edge)
+                            edges_removed += 1
+                            ablated_edges.append(edge)
+                            kl_score = avg_kl_div
+                            print(f"Edge removed.")
+
+        print(f"\nCircuit discovery complete!")
+        print(f"Edges evaluated: {total_edges_evaluated}")
+        print(f"Edges removed: {edges_removed}")
+        print(f"Final circuit edges: {len(self.circuit.edges)}")
+        print(f"Final KL divergence: {kl_score:.6f}")
+
+        return self.circuit
+
+    def create_ablation_hook(
+            self,
+            sender: Node,
+            receiver: Node,
+            clean_cache: Dict[str, torch.Tensor]
+    ) -> Callable:
+        """
+        Create a hook function for edge ablation.
+        For Pythia with parallel attention/MLP:
+        - resid_post = resid_pre + attn_out + mlp_out
+        - To ablate attention head output -> resid_post: resid_post = resid_post - specific head output
+        """
+
+        def ablation_hook(activation, hook):
+            # Get the clean sender contribution
+            if sender.full_activation not in clean_cache:
+                return activation
+
+            sender_contribution = clean_cache[sender.full_activation]
+
+            if sender.component_type == "attention":
+                sender_act = clean_cache[sender.full_activation]
+                sender_act = sender_act[:, :, sender.head_idx, :]
+                W_O = self.model.blocks[sender.layer - 1].attn.W_O
+                W_O_h = W_O[sender.head_idx]
+                sender_contribution = sender_act @ W_O_h
+            else:
+                sender_contribution = clean_cache[sender.full_activation]
+
+            # Subtract sender's contribution from the output
+            # This effectively removes the edge from sender to receiver
+            ablated_activation = activation - sender_contribution
+
+            return ablated_activation
+
+        return ablation_hook
+
+
+    def run_with_edge_ablation(
+            self,
+            inputs: torch.Tensor,
+            edge_to_ablate: Edge,
+            clean_cache: Dict[str, torch.Tensor],
+            ablated_edges: Optional[List[Edge]] = None
+    ) -> torch.Tensor:
+        """Run model with optional edge ablation."""
+
+        # Clear previous hooks
+        self.model.reset_hooks()
+
+        # Check if there are edges previously ablated and, if so, re-add the hooks for them
+        if ablated_edges:
+            for edge in ablated_edges:
+                hook = self.create_ablation_hook(
+                    edge.sender,
+                    edge.receiver,
+                    clean_cache
+                )
+                if hasattr(self.model, 'add_hook'):
+                    self.model.add_hook(edge.receiver.full_activation, hook)
+
+        # Create ablation hook
+        ablation_hook = self.create_ablation_hook(
+            edge_to_ablate.sender,
+            edge_to_ablate.receiver,
+            clean_cache
+        )
+
+        # Register hook on the receiver
+        if hasattr(self.model, 'add_hook'):
+            self.model.add_hook(edge_to_ablate.receiver.full_activation, ablation_hook)
+
+        # Run forward pass
+        with torch.no_grad():
+            ablated_logits = self.model(inputs)
+
+        return ablated_logits
+
+

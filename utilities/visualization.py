@@ -215,7 +215,7 @@ def visualize_computational_graph(graph, figsize=(16, 12), layout_type='hierarch
     edge_types = classify_edge_types(graph)
     for edge in graph.edges:
         edge_type = edge_types.get((edge.sender, edge.receiver), 'other')
-        G.add_edge(edge.sender, edge.receiver, weight=edge.weight, edge_type=edge_type)
+        G.add_edge(edge.sender, edge.receiver, edge_type=edge_type)
 
     # Define color scheme optimized for Pythia architecture
     color_map = {
@@ -582,7 +582,7 @@ def analyze_pythia_graph_structure(graph):
     return edge_type_counts
 
 
-def visualize_pythia_transformer_graph(computational_graph, analysis=True):
+def visualize_pythia_transformer_graph(computational_graph, analysis=False):
     """
     Complete visualization pipeline optimized for Pythia architecture.
     """
