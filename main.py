@@ -1,7 +1,7 @@
 import torch
 from transformer_lens import HookedTransformer
 from algorithms.ACDC import ACDC
-from utilities.visualization import visualize_pythia_transformer_graph
+from utilities.visualization import visualize_pythia_graph
 from tasks.IOI_Dataset import IOIDatasetBuilder
 from algorithms.ActivationPatching import ActivationPatching
 
@@ -17,9 +17,10 @@ def run_circuit_discovery():
 
     # ACDC
     acdc = ACDC(model, dataset=dataset)
-    graph = acdc.discover_circuit()
-    visualize_pythia_transformer_graph(graph)
-
+    full_graph = acdc.build_computational_graph()
+    visualize_pythia_graph(graph=full_graph, figsize=(20, 20))
+    circuit = acdc.discover_circuit()
+    visualize_pythia_graph(graph=circuit, figsize=(20,20))
 
 if __name__ == "__main__":
     run_circuit_discovery()

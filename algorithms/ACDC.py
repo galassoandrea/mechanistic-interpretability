@@ -119,7 +119,7 @@ class ACDC:
     for finding minimal circuits responsible for specific tasks.
     """
 
-    def __init__(self, model, dataset, task_name: str = "IOI", threshold: float = 0.05):
+    def __init__(self, model, dataset, task_name: str = "IOI", threshold: float = 0.1):
 
         self.model = model
         self.dataset = dataset
