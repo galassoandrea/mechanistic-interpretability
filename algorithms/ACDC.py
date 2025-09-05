@@ -5,7 +5,7 @@ from collections import defaultdict, deque
 from utilities.evaluation import kl_divergence
 import numpy as np
 from tqdm import tqdm
-
+from tasks import IOI_Dataset
 
 @dataclass
 class Node:
@@ -119,13 +119,13 @@ class ACDC:
     for finding minimal circuits responsible for specific tasks.
     """
 
-    def __init__(self, model, dataset, task_name: str = "IOI", threshold: float = 0.1):
+    def __init__(self, model, task: str = "IOI", mode: str = "greedy", threshold: float = 0.1):
 
         self.model = model
-        self.dataset = dataset
-        self.task_name = task_name
+        self.task_name = task
         self.threshold = threshold
         self.device = model.cfg.device
+        self.mode = mode
 
         # Initialize graphs
         self.full_graph = None
@@ -136,6 +136,15 @@ class ACDC:
 
         # Hooks for intervention
         self.hooks = []
+
+        # Create dataset based on the task
+        if task == "IOI":
+            print("Building IOI dataset...")
+            dataset_builder = IOI_Dataset.IOIDatasetBuilder(model)
+            self.dataset = dataset_builder.build_dataset(num_samples=50)
+        elif task == "Induction": # TODO: Implement induction task
+            pass
+
 
     def build_computational_graph(self):
         """
@@ -345,6 +354,11 @@ class ACDC:
                             kl_score = avg_kl_div
                             print(f"Edge removed.")
 
+        # Compute final KL divergence for independent evaluation (add all hooks at the same time)
+        if self.mode == "independent":
+            kl_score = self.get_final_performance(ablated_edges, clean_logits, caches)
+
+        # Print summary of results
         print(f"\nCircuit discovery complete!")
         print(f"Edges evaluated: {total_edges_evaluated}")
         print(f"Edges removed: {edges_removed}")
@@ -370,8 +384,6 @@ class ACDC:
             # Get the clean sender contribution
             if sender.full_activation not in clean_cache:
                 return activation
-
-            sender_contribution = clean_cache[sender.full_activation]
 
             if sender.component_type == "attention":
                 sender_act = clean_cache[sender.full_activation]
@@ -403,8 +415,8 @@ class ACDC:
         # Clear previous hooks
         self.model.reset_hooks()
 
-        # Check if there are edges previously ablated and, if so, re-add the hooks for them
-        if ablated_edges:
+        # In case of greedy evaluation, check if there are edges previously ablated and, if so, re-add the hooks for them
+        if ablated_edges and self.mode == "greedy":
             for edge in ablated_edges:
                 hook = self.create_ablation_hook(
                     edge.sender,
@@ -430,5 +442,31 @@ class ACDC:
             ablated_logits = self.model(inputs)
 
         return ablated_logits
+
+
+    def get_final_performance(self, ablated_edges, clean_logits, clean_caches):
+        """Evaluate final performance after all edges have been ablated."""
+        kl_divs = []
+        for i, example in enumerate(self.dataset):
+
+            # Clear previous hooks
+            self.model.reset_hooks()
+
+            if ablated_edges:
+                for edge in ablated_edges:
+                    hook = self.create_ablation_hook(
+                        edge.sender,
+                        edge.receiver,
+                        clean_caches[i]
+                    )
+                    if hasattr(self.model, 'add_hook'):
+                        self.model.add_hook(edge.receiver.full_activation, hook)
+
+                with torch.no_grad():
+                    ablated_logits = self.model(example.clean_tokens)
+                kl_div = kl_divergence(clean_logits[i], ablated_logits)
+                kl_divs.append(kl_div.item())
+        avg_kl_div = np.mean(kl_divs)
+        return avg_kl_div
 
 

@@ -2,7 +2,6 @@ import torch
 from transformer_lens import HookedTransformer
 from algorithms.ACDC import ACDC
 from utilities.visualization import visualize_pythia_graph
-from tasks.IOI_Dataset import IOIDatasetBuilder
 from algorithms.ActivationPatching import ActivationPatching
 
 def run_circuit_discovery():
@@ -10,13 +9,8 @@ def run_circuit_discovery():
     print("Loading model...")
     model = HookedTransformer.from_pretrained("EleutherAI/pythia-70m-deduped", device="cuda" if torch.cuda.is_available() else "cpu")
 
-    # Build IOI dataset
-    print("Building IOI dataset...")
-    dataset_builder = IOIDatasetBuilder(model)
-    dataset = dataset_builder.build_dataset(num_samples=10)
-
     # ACDC
-    acdc = ACDC(model, dataset=dataset)
+    acdc = ACDC(model, mode="independent", threshold=0.01)
     full_graph = acdc.build_computational_graph()
     visualize_pythia_graph(graph=full_graph, figsize=(20, 20))
     circuit = acdc.discover_circuit()
