@@ -3,18 +3,19 @@ from transformer_lens import HookedTransformer
 from algorithms.ACDC import ACDC
 from utilities.visualization import visualize_pythia_graph
 from algorithms.ActivationPatching import ActivationPatching
+from tasks.Induction import InductionDatasetBuilder
 
 def run_circuit_discovery():
 
     print("Loading model...")
     model = HookedTransformer.from_pretrained("EleutherAI/pythia-70m-deduped", device="cuda" if torch.cuda.is_available() else "cpu")
 
-    # ACDC
-    acdc = ACDC(model, mode="independent", threshold=0.01)
+    ## ACDC
+    acdc = ACDC(model, task="IOI", mode="independent", threshold=0.01)
     full_graph = acdc.build_computational_graph()
-    visualize_pythia_graph(graph=full_graph, figsize=(20, 20))
+    visualize_pythia_graph(graph=full_graph, figsize=(20,24))
     circuit = acdc.discover_circuit()
-    visualize_pythia_graph(graph=circuit, figsize=(20,20))
+    visualize_pythia_graph(graph=circuit, figsize=(20,24))
 
 if __name__ == "__main__":
     run_circuit_discovery()

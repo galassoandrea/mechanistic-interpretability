@@ -5,7 +5,7 @@ from collections import defaultdict, deque
 from utilities.evaluation import kl_divergence
 import numpy as np
 from tqdm import tqdm
-from tasks import IOI_Dataset
+from tasks import IOI, Induction
 
 @dataclass
 class Node:
@@ -140,10 +140,12 @@ class ACDC:
         # Create dataset based on the task
         if task == "IOI":
             print("Building IOI dataset...")
-            dataset_builder = IOI_Dataset.IOIDatasetBuilder(model)
+            dataset_builder = IOI.IOIDatasetBuilder(model)
             self.dataset = dataset_builder.build_dataset(num_samples=50)
-        elif task == "Induction": # TODO: Implement induction task
-            pass
+        elif task == "induction":
+            print("Building Induction dataset...")
+            dataset_builder = Induction.InductionDatasetBuilder(model)
+            self.dataset = dataset_builder.build_dataset(num_samples=50)
 
 
     def build_computational_graph(self):

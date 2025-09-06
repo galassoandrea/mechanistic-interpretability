@@ -222,11 +222,11 @@ def create_pythia_graph(graph, num_layers=6, num_attention_heads=8):
             node_types[node] = 'embedding'
         elif node.component_type == 'residual':
             if 'pre' in node.name:
-                pos[node] = (0, node.layer * 9 - 2)
+                pos[node] = (0, node.layer * 15 - 4)
                 node_colors[node] = colors['residual_pre']
                 node_types[node] = 'residual_pre'
             else:
-                pos[node] = (0, node.layer * 9 + 4)
+                pos[node] = (0, node.layer * 15 + 6)
                 node_colors[node] = colors['residual_post']
                 node_types[node] = 'residual_post'
         elif node.component_type == 'attention':
@@ -234,14 +234,14 @@ def create_pythia_graph(graph, num_layers=6, num_attention_heads=8):
             span = 2.0  # controls how wide the attention heads spread
             x_start = -span
             x_end = span
-            step = (x_end - x_start) / max(1, num_attention_heads - 1)
+            step = (x_end - x_start) / max(1, num_attention_heads)
             x_pos = x_start + node.head_idx * step
-            y_pos = node.layer * 9 + 1
+            y_pos = node.layer * 15 + 1
             pos[node] = (x_pos, y_pos)
             node_colors[node] = colors['attention']
             node_types[node] = 'attention'
         elif node.component_type == 'mlp':
-            pos[node] = (2, node.layer * 9 + 1)
+            pos[node] = (2, node.layer * 15 + 1)
             node_colors[node] = colors['mlp']
             node_types[node] = 'mlp'
         else:

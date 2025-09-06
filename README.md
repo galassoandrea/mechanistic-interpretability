@@ -7,3 +7,6 @@ In other words, by applying mechanistic interpretability algorithms, we can unde
 
 
 This repository is the basis for my master's degree thesis study.
+
+<img src="utilities/plots/full_graph.png" alt="Initial full model graph" width="400">
+<img src="utilities/plots/circuit_graph_ioi.png" alt="Final circuit graph for the IOI task" width="400">

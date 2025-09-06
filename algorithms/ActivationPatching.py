@@ -7,7 +7,7 @@ from transformer_lens import HookedTransformer
 from transformer_lens.hook_points import HookPoint
 from transformer_lens.utils import get_act_name
 from utilities.evaluation import logits_to_logit_diff
-from tasks.IOI_Dataset import IOIExample
+from tasks.IOI import IOIExample
 from functools import partial
 from jaxtyping import Float
 from utilities.visualization import plot_circuit_graph, plot_activation_importance
