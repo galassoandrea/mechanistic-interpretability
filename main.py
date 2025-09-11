@@ -10,8 +10,8 @@ def run_circuit_discovery():
     print("Loading model...")
     model = HookedTransformer.from_pretrained("EleutherAI/pythia-70m-deduped", device="cuda" if torch.cuda.is_available() else "cpu")
 
-    ## ACDC
-    acdc = ACDC(model, task="IOI", mode="independent", threshold=0.01)
+    # ACDC
+    acdc = ACDC(model, task="IOI", mode="node", method="greedy", threshold=0.01)
     full_graph = acdc.build_computational_graph()
     visualize_pythia_graph(graph=full_graph, figsize=(20,24))
     circuit = acdc.discover_circuit()
