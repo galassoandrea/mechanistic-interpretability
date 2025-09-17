@@ -1,132 +1,11 @@
 import torch
-from dataclasses import dataclass
 from typing import Dict, List, Optional, Set, Any, Callable
 from collections import defaultdict, deque
 from utilities.evaluation import kl_divergence
 import numpy as np
 from tqdm import tqdm
-from tasks import IOI, Induction
-
-@dataclass
-class Node:
-    """Represents a node in the computational graph."""
-    name: str  # e.g., "mlp.0", "attn.1.head.2", "resid_pre.3"
-    layer: int  # Layer index in the model
-    component_type: str  # "attention", "mlp", "embedding", "resid", etc.
-    full_activation: str
-    head_idx: Optional[int] = None  # For attention heads
-
-    def __hash__(self):
-        return hash((self.name, self.layer, self.component_type, self.head_idx))
-
-    def __eq__(self, other):
-        if not isinstance(other, Node):
-            return False
-        return (self.name == other.name and
-                self.layer == other.layer and
-                self.component_type == other.component_type and
-                self.head_idx == other.head_idx)
-
-    def __repr__(self):
-        return f"Node({self.name})"
-
-
-@dataclass
-class Edge:
-    """Represents an edge in the computational graph."""
-    sender: Node  # Source node
-    receiver: Node  # Destination node
-
-    def __hash__(self):
-        return hash((self.sender, self.receiver))
-
-    def __eq__(self, other):
-        if not isinstance(other, Edge):
-            return False
-        return self.sender == other.sender and self.receiver == other.receiver
-
-    def __repr__(self):
-        return f"Edge({self.sender.name} -> {self.receiver.name})"
-
-
-class ComputationalGraph:
-    """Represents the full computational graph of a transformer model."""
-
-    def __init__(self):
-        self.nodes: Set[Node] = set()
-        self.edges: Set[Edge] = set()
-        self.adjacency: Dict[Node, Set[Node]] = defaultdict(set)  # sender -> receivers
-        self.reverse_adjacency: Dict[Node, Set[Node]] = defaultdict(set)  # receiver -> senders
-
-    def add_node(self, node: Node):
-        """Add a node to the graph."""
-        self.nodes.add(node)
-
-    def add_edge(self, edge: Edge):
-        """Add an edge to the graph."""
-        self.edges.add(edge)
-        self.adjacency[edge.sender].add(edge.receiver)
-        self.reverse_adjacency[edge.receiver].add(edge.sender)
-
-    def remove_edge(self, edge: Edge):
-        """Remove an edge from the graph."""
-        if edge in self.edges:
-            self.edges.remove(edge)
-            self.adjacency[edge.sender].discard(edge.receiver)
-            self.reverse_adjacency[edge.receiver].discard(edge.sender)
-
-    def remove_node(self, node: Node):
-        """Remove a node from the graph."""
-        if node in self.nodes:
-            self.nodes.remove(node)
-            # Remove all edges associated with the node
-            for receiver in self.adjacency[node].copy():
-                self.remove_edge(Edge(sender=node, receiver=receiver))
-            for sender in self.reverse_adjacency[node].copy():
-                self.remove_edge(Edge(sender=sender, receiver=node))
-            # Clean up adjacency lists
-            if node in self.adjacency:
-                del self.adjacency[node]
-            if node in self.reverse_adjacency:
-                del self.reverse_adjacency[node]
-
-    def get_senders(self, node: Node) -> Set[Node]:
-        """Get all nodes that send to the given node."""
-        return self.reverse_adjacency.get(node, set())
-
-    def get_receivers(self, node: Node) -> Set[Node]:
-        """Get all nodes that receive from the given node."""
-        return self.adjacency.get(node, set())
-
-    def topological_sort(self) -> List[Node]:
-        """
-        Return nodes in topological order (from output to input).
-        For ACDC, we want reverse topological order.
-        """
-        in_degree = {node: len(self.get_senders(node)) for node in self.nodes}
-        queue = deque([node for node in self.nodes if in_degree[node] == 0])
-        result = []
-
-        while queue:
-            node = queue.popleft()
-            result.append(node)
-            for receiver in self.get_receivers(node):
-                in_degree[receiver] -= 1
-                if in_degree[receiver] == 0:
-                    queue.append(receiver)
-
-        # Reverse for output-to-input ordering
-        return list(reversed(result))
-
-    def copy(self) -> 'ComputationalGraph':
-        """Create a deep copy of the graph."""
-        new_graph = ComputationalGraph()
-        new_graph.nodes = self.nodes.copy()
-        new_graph.edges = self.edges.copy()
-        new_graph.adjacency = {k: v.copy() for k, v in self.adjacency.items()}
-        new_graph.reverse_adjacency = {k: v.copy() for k, v in self.reverse_adjacency.items()}
-        return new_graph
-
+from tasks import IOI, Induction, Factuality
+from utilities.ComputationalGraph import ComputationalGraph, Node, Edge
 
 class ACDC:
     """
@@ -134,9 +13,10 @@ class ACDC:
     for finding minimal circuits responsible for specific tasks.
     """
 
-    def __init__(self, model, task: str = "IOI", mode: str = "edge", method: str = "greedy", threshold: float = 0.1):
+    def __init__(self, model, model_name, task: str = "IOI", mode: str = "edge", method: str = "greedy", threshold: float = 0.1):
 
         self.model = model
+        self.model_name = model_name
         self.task_name = task
         self.threshold = threshold
         self.device = model.cfg.device
@@ -157,23 +37,19 @@ class ACDC:
         if task == "IOI":
             print("Building IOI dataset...")
             dataset_builder = IOI.IOIDatasetBuilder(model)
-            self.dataset = dataset_builder.build_dataset(num_samples=50)
+            self.dataset = dataset_builder.build_dataset(num_samples=10)
         elif task == "induction":
             print("Building Induction dataset...")
             dataset_builder = Induction.InductionDatasetBuilder(model)
             self.dataset = dataset_builder.build_dataset(num_samples=50)
+        elif task == "factuality":
+            print("Building Factuality dataset...")
+            dataset_builder = Factuality.FactualityDatasetBuilder(model)
+            self.dataset = dataset_builder.build_dataset()
 
 
     def build_computational_graph(self):
-        """
-        Build the full computational graph of the model.
-        The model used for the experiments is the EleutherAI/Pythia model.
-        Its architecture is different from the original transformer architecture.
-        Key difference: Parallel attention and MLP, not sequential:
-        resid_pre → attention ↘
-                 ↘     → resid_post
-                 → MLP ↗
-        """
+        """Build the full computational graph of the model."""
         graph = ComputationalGraph()
         model_components = self.model.hook_dict.keys()
         # Store nodes by layer and type for easier edge creation
@@ -205,7 +81,7 @@ class ACDC:
                             if "attention" not in nodes_by_layer[layer]:
                                 nodes_by_layer[layer]["attention"] = []
                             nodes_by_layer[layer]["attention"].append(node)
-                elif "mlp" in full_activation:
+                elif "mlp_out" in full_activation:
                     # MLP nodes
                     layer = int(full_activation.split('.')[1]) + 1
                     act_name = full_activation.rsplit(".", 1)[1]
@@ -233,7 +109,13 @@ class ACDC:
                     nodes_by_layer[layer][act_name] = node
 
         # Create edges following transformer architecture
-        max_layer = 6 #max(nodes_by_layer.keys())
+        if "pythia" in self.model_name:
+            graph = self.create_pythia_edges(graph, nodes_by_layer)
+        return graph
+
+    def create_pythia_edges(self, graph, nodes_by_layer):
+        # Create edges following pythia model architecture
+        max_layer = self.model.cfg.n_layers
         # Handle embedding to layer 1 connection
         if 0 in nodes_by_layer and 1 in nodes_by_layer:
             embed_node = nodes_by_layer[0]["embedding"]
@@ -241,10 +123,8 @@ class ACDC:
             if layer_1_resid_pre:
                 edge = Edge(sender=embed_node, receiver=layer_1_resid_pre)
                 graph.add_edge(edge)
-
         for layer in range(1, max_layer + 1):
             current_layer_nodes = nodes_by_layer[layer]
-
             # Previous layer's resid_post -> current layer's resid_pre
             if layer > 1:  # Skip for layer 1 (handled by embedding)
                 prev_resid_post = nodes_by_layer[layer - 1].get("hook_resid_post")
@@ -252,20 +132,17 @@ class ACDC:
                 if prev_resid_post and curr_resid_pre:
                     edge = Edge(sender=prev_resid_post, receiver=curr_resid_pre)
                     graph.add_edge(edge)
-
             # resid_pre -> attention (parallel path)
             resid_pre = current_layer_nodes.get("hook_resid_pre")
             if resid_pre and "attention" in current_layer_nodes:
                 for attn_head_node in current_layer_nodes["attention"]:
                     edge = Edge(sender=resid_pre, receiver=attn_head_node)
                     graph.add_edge(edge)
-
             # resid_pre -> MLP (parallel path)
             if resid_pre and "mlp" in current_layer_nodes:
                 for mlp_node in current_layer_nodes["mlp"]:
                     edge = Edge(sender=resid_pre, receiver=mlp_node)
                     graph.add_edge(edge)
-
             # attention and MLP outputs -> resid_post (parallel combination)
             resid_post = current_layer_nodes.get("hook_resid_post")
             if resid_post:
@@ -273,14 +150,12 @@ class ACDC:
                 if resid_pre:
                     edge = Edge(sender=resid_pre, receiver=resid_post)
                     graph.add_edge(edge)
-
                 # Attention heads output -> resid_post
                 if "attention" in current_layer_nodes:
                     for attn_head_node in current_layer_nodes["attention"]:
                         if self.is_output_activation(attn_head_node.full_activation, "attention"):
                             edge = Edge(sender=attn_head_node, receiver=resid_post)
                             graph.add_edge(edge)
-
                 # MLP output -> resid_post
                 if "mlp" in current_layer_nodes:
                     for mlp_node in current_layer_nodes["mlp"]:
@@ -288,7 +163,6 @@ class ACDC:
                         if self.is_output_activation(mlp_node.full_activation, "mlp"):
                             edge = Edge(sender=mlp_node, receiver=resid_post)
                             graph.add_edge(edge)
-
         return graph
 
     def is_output_activation(self, full_activation, component_type):
@@ -305,7 +179,7 @@ class ACDC:
     def discover_circuit(self):
         """ Main method to perform circuit discovery using edge pruning. """
 
-        print(f"Building computational graph for {self.task_name} task...")
+        print(f"Building computational graph for {self.model_name}...")
         self.full_graph = self.build_computational_graph()
         self.circuit = self.full_graph.copy()
         ordered_nodes = self.circuit.topological_sort()
@@ -323,14 +197,21 @@ class ACDC:
             clean_logits.append(logits)
             caches.append(cache)
 
+        if "pythia" in self.model_name:
+            self.circuit = self.discover_circuit_pythia(ordered_nodes, caches, clean_logits)
+        elif "gemma" in self.model_name:
+            self.circuit = self.discover_circuit_gemma(ordered_nodes, caches, clean_logits)
+        return self.circuit
+
+    def discover_circuit_pythia(self, ordered_nodes, caches, clean_logits):
         if self.mode == "edge":
-            print(f"Starting edge pruning with threshold: {self.threshold}")
+            print(f"Starting edge evaluation with threshold: {self.threshold}")
             # Iterate through nodes and prune edges
             edges_removed = 0
             total_edges_evaluated = 0
             kl_score = 0.0
             ablated_edges = []
-            for receiver in tqdm(ordered_nodes, desc="Pruning edges"):
+            for receiver in tqdm(ordered_nodes, desc="Evaluating edges"):
                 if receiver.name == "hook_resid_post":
                     senders = self.full_graph.get_senders(receiver)
                     for sender in senders:
@@ -384,13 +265,13 @@ class ACDC:
             print(f"Final KL divergence: {kl_score:.6f}")
 
         elif self.mode == "node":
-            print(f"Starting node ablation with threshold: {self.threshold}")
+            print(f"Starting node evaluation with threshold: {self.threshold}")
             # Iterate through nodes and ablate them
             nodes_removed = 0
             total_nodes_evaluated = 0
             kl_score = 0.0
             ablated_nodes = []
-            for node in tqdm(ordered_nodes, desc="Ablating nodes"):
+            for node in tqdm(ordered_nodes, desc="Evaluating nodes"):
                 if node.name in ['hook_resid_pre', 'hook_resid_post', 'hook_mlp_out', 'hook_z']:
                     if node.name == "hook_z":
                         print(f"Evaluating node: L{node.layer}-Head{node.head_idx}")
@@ -427,6 +308,7 @@ class ACDC:
             print(f"Final KL divergence: {kl_score:.6f}")
 
         return self.circuit
+
 
     def create_edge_ablation_hook(
             self,

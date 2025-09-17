@@ -1,16 +1,14 @@
 from collections import defaultdict
 import torch
-from typing import List
 from dataclasses import dataclass
 from tqdm import tqdm
-from transformer_lens import HookedTransformer
 from transformer_lens.hook_points import HookPoint
 from transformer_lens.utils import get_act_name
 from utilities.evaluation import logits_to_logit_diff
-from tasks.IOI import IOIExample
 from functools import partial
 from jaxtyping import Float
 from utilities.visualization import plot_circuit_graph, plot_activation_importance
+from tasks import IOI, Induction
 
 
 @dataclass
@@ -29,22 +27,33 @@ class CircuitNode:
 
 class ActivationPatching:
     """Main class for activation patching and circuit discovery"""
-    def __init__(self, model: HookedTransformer, dataset: List[IOIExample]):
+    def __init__(self, model, task = "IOI", threshold = 0.3):
         self.model = model
-        self.dataset = dataset
+        self.task_name = task
         self.device = model.cfg.device
-        self.threshold: float = 0.3
+        self.threshold = threshold
         self.activation_types = ['resid_pre', 'z', 'mlp_out']
         self.circuit_nodes = set()
         self.patching_results = defaultdict(list)
         self.dropped_activations = set()
 
+        # Create dataset based on the task
+        if task == "IOI":
+            print("Building IOI dataset...")
+            dataset_builder = IOI.IOIDatasetBuilder(model)
+            self.dataset = dataset_builder.build_dataset(num_samples=50)
+        elif task == "induction":
+            print("Building Induction dataset...")
+            dataset_builder = Induction.InductionDatasetBuilder(model)
+            self.dataset = dataset_builder.build_dataset(num_samples=50)
+
+
     def permanent_ablate_hook(self, position):
-        def hook_fn(activation, hook):
+        def ablation_hook(activation, hook):
             activation[:, position, :] = 0.0
             return activation
 
-        return hook_fn
+        return ablation_hook
 
     def patch_single_activation(self, node: CircuitNode, example, clean_cache) -> float:
         """Patch a single activation and compute the resulting score"""

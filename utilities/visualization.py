@@ -185,20 +185,8 @@ def visualize_circuit_graph(model, heads: List):
     plt.show()
 
 
-def create_pythia_graph(graph, num_layers=6, num_attention_heads=8):
-    """
-    Create a NetworkX graph representing the Pythia-70m computational graph.
-
-    Args:
-        num_layers (int): Number of transformer layers
-        num_attention_heads (int): Number of attention heads per layer
-
-    Returns:
-        G (nx.DiGraph): NetworkX directed graph
-        pos (dict): Node positions for visualization
-        node_colors (dict): Node color mapping
-        node_types (dict): Node type mapping
-    """
+def create_pythia_graph(graph, num_layers, num_attention_heads):
+    """Create a NetworkX graph representing the Pythia-70m computational graph."""
 
     G = nx.DiGraph()
     pos = {}
@@ -255,18 +243,9 @@ def create_pythia_graph(graph, num_layers=6, num_attention_heads=8):
     return G, pos, node_colors, node_types
 
 
-def visualize_pythia_graph(graph, num_layers=6, num_attention_heads=8,
+def visualize_pythia_graph(graph, num_layers, num_attention_heads,
                            figsize=(16, 12), node_size=3000, font_size=8):
-    """
-    Visualize the Pythia-70m computational graph using NetworkX.
-
-    Args:
-        num_layers (int): Number of transformer layers
-        num_attention_heads (int): Number of attention heads per layer
-        figsize (tuple): Figure size (width, height)
-        node_size (int): Size of nodes in the visualization
-        font_size (int): Font size for node labels
-    """
+    """Visualize the Pythia-70m computational graph using NetworkX."""
 
     # Create the graph
     G, pos, node_colors, node_types = create_pythia_graph(graph, num_layers, num_attention_heads)
