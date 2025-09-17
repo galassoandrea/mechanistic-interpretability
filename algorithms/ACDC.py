@@ -1,6 +1,6 @@
 import torch
-from typing import Dict, List, Optional, Set, Any, Callable
-from collections import defaultdict, deque
+from typing import Dict, List, Optional, Callable
+from collections import defaultdict
 from utilities.evaluation import kl_divergence
 import numpy as np
 from tqdm import tqdm
@@ -111,6 +111,8 @@ class ACDC:
         # Create edges following transformer architecture
         if "pythia" in self.model_name:
             graph = self.create_pythia_edges(graph, nodes_by_layer)
+        elif "gemma" in self.model_name:
+            graph = self.create_gemma_edges(graph, nodes_by_layer)
         return graph
 
     def create_pythia_edges(self, graph, nodes_by_layer):
@@ -165,6 +167,59 @@ class ACDC:
                             graph.add_edge(edge)
         return graph
 
+    def create_gemma_edges(self, graph, nodes_by_layer):
+        # Create edges following gemma model architecture
+        max_layer = self.model.cfg.n_layers
+        if 0 in nodes_by_layer and 1 in nodes_by_layer:
+            embed_node = nodes_by_layer[0]["embedding"]
+            layer_1_resid_pre = nodes_by_layer[1].get("hook_resid_pre")
+            if layer_1_resid_pre:
+                edge = Edge(sender=embed_node, receiver=layer_1_resid_pre)
+                graph.add_edge(edge)
+        for layer in range(1, max_layer + 1):
+            current_layer_nodes = nodes_by_layer[layer]
+            # Previous layer's resid_post -> current layer's resid_pre
+            if layer > 1:  # Skip for layer 1 (handled by embedding)
+                prev_resid_post = nodes_by_layer[layer - 1].get("hook_resid_post")
+                curr_resid_pre = current_layer_nodes.get("hook_resid_pre")
+                if prev_resid_post and curr_resid_pre:
+                    edge = Edge(sender=prev_resid_post, receiver=curr_resid_pre)
+                    graph.add_edge(edge)
+            # resid_pre -> attention
+            resid_pre = current_layer_nodes.get("hook_resid_pre")
+            if resid_pre and "attention" in current_layer_nodes:
+                for attn_head_node in current_layer_nodes["attention"]:
+                    edge = Edge(sender=resid_pre, receiver=attn_head_node)
+                    graph.add_edge(edge)
+            # attention -> resid_mid
+            resid_mid = current_layer_nodes.get("hook_resid_mid")
+            if resid_mid and "attention" in current_layer_nodes:
+                for attn_head_node in current_layer_nodes["attention"]:
+                    if self.is_output_activation(attn_head_node.full_activation, "attention"):
+                        edge = Edge(sender=attn_head_node, receiver=resid_mid)
+                        graph.add_edge(edge)
+            # resid_pre -> resid_mid (skip connection)
+            if resid_pre and resid_mid:
+                edge = Edge(sender=resid_pre, receiver=resid_mid)
+                graph.add_edge(edge)
+            # resid_mid -> mlp
+            if resid_mid and "mlp" in current_layer_nodes:
+                for mlp_node in current_layer_nodes["mlp"]:
+                    edge = Edge(sender=resid_mid, receiver=mlp_node)
+                    graph.add_edge(edge)
+            # mlp output -> resid_post
+            resid_post = current_layer_nodes.get("hook_resid_post")
+            if resid_post and "mlp" in current_layer_nodes:
+                for mlp_node in current_layer_nodes["mlp"]:
+                    if self.is_output_activation(mlp_node.full_activation, "mlp"):
+                        edge = Edge(sender=mlp_node, receiver=resid_post)
+                        graph.add_edge(edge)
+            # resid_mid -> resid_post (skip connection)
+            if resid_mid and resid_post:
+                edge = Edge(sender=resid_mid, receiver=resid_post)
+                graph.add_edge(edge)
+        return graph
+
     def is_output_activation(self, full_activation, component_type):
         """ Determine if an activation is an output activation for a given component type."""
         if component_type == "attention" and "attn.hook_z" in full_activation:
@@ -215,43 +270,28 @@ class ACDC:
                 if receiver.name == "hook_resid_post":
                     senders = self.full_graph.get_senders(receiver)
                     for sender in senders:
-                        if sender.name in ["hook_resid_pre", "hook_mlp_out"]:
-                            edge = Edge(sender, receiver)
+                        if sender.name == "hook_z":
                             print(f"Evaluating edge: L{sender.layer}-{sender.name.split('_', 1)[1]} -> L{receiver.layer}-{receiver.name.split('_', 1)[1]}")
-                            # Temporarily remove the edge
-                            kl_divs = []
-                            for i, example in enumerate(self.dataset):
-                                clean_tokens = example.clean_tokens
-                                # Ablate the edge by zeroing out the sender's contribution (not the whole activation) only on receiver
-                                ablated_logits = self.run_with_edge_ablation(clean_tokens, edge, caches[i], ablated_edges)
-                                kl_div = kl_divergence(clean_logits[i], ablated_logits)
-                                kl_divs.append(kl_div.item())
-                            avg_kl_div = np.mean(kl_divs)
-                            total_edges_evaluated += 1
-                            print(f"Avg KL Divergence = {avg_kl_div:.6f}")
-                            if avg_kl_div < self.threshold:
-                                self.circuit.remove_edge(edge)
-                                edges_removed += 1
-                                ablated_edges.append(edge)
-                                print(f"Edge removed.")
-                        elif sender.name == "hook_z":
-                            edge = Edge(sender, receiver)
+                        else:
                             print(f"Evaluating edge: L{sender.layer}-Head{sender.head_idx} -> L{receiver.layer}-{receiver.name.split('_', 1)[1]}")
-                            kl_divs = []
-                            for i, example in enumerate(self.dataset):
-                                clean_tokens = example.clean_tokens
-                                ablated_logits = self.run_with_edge_ablation(clean_tokens, edge, caches[i], ablated_edges)
-                                kl_div = kl_divergence(clean_logits[i], ablated_logits)
-                                kl_divs.append(kl_div.item())
-                            avg_kl_div = np.mean(kl_divs)
-                            total_edges_evaluated += 1
-                            print(f"Avg KL Divergence = {avg_kl_div:.6f}")
-                            if avg_kl_div < self.threshold:
-                                self.circuit.remove_edge(edge)
-                                edges_removed += 1
-                                ablated_edges.append(edge)
-                                kl_score = avg_kl_div
-                                print(f"Edge removed.")
+                        edge = Edge(sender, receiver)
+                        # Temporarily remove the edge
+                        kl_divs = []
+                        for i, example in enumerate(self.dataset):
+                            clean_tokens = example.clean_tokens
+                            # Ablate the edge by zeroing out the sender's contribution (not the whole activation) only on receiver
+                            ablated_logits = self.run_with_edge_ablation(clean_tokens, edge, caches[i], ablated_edges)
+                            kl_div = kl_divergence(clean_logits[i], ablated_logits)
+                            kl_divs.append(kl_div.item())
+                        avg_kl_div = np.mean(kl_divs)
+                        total_edges_evaluated += 1
+                        print(f"Avg KL Divergence = {avg_kl_div:.6f}")
+                        if avg_kl_div < self.threshold:
+                            self.circuit.remove_edge(edge)
+                            edges_removed += 1
+                            ablated_edges.append(edge)
+                            kl_score = avg_kl_div
+                            print(f"Edge removed.")
 
             # Compute final KL divergence for independent evaluation (add all hooks at the same time)
             if self.method == "independent":
@@ -296,9 +336,123 @@ class ACDC:
                         kl_score = avg_kl_div
                         print(f"Node removed.")
             # Compute final KL divergence for independent evaluation (add all hooks at the same time)
-            print(ablated_nodes)
             if self.method == "independent":
                 kl_score = self.get_final_performance(clean_logits=clean_logits, clean_caches=caches, ablated_nodes=ablated_nodes)
+
+            # Print summary of results
+            print(f"\nCircuit discovery complete!")
+            print(f"Nodes evaluated: {total_nodes_evaluated}")
+            print(f"Nodes removed: {nodes_removed}")
+            print(f"Final circuit nodes: {len(self.circuit.nodes)}")
+            print(f"Final KL divergence: {kl_score:.6f}")
+
+        return self.circuit
+
+    def discover_circuit_gemma(self, ordered_nodes, caches, clean_logits):
+        if self.mode == "edge":
+            print(f"Starting edge evaluation with threshold: {self.threshold}")
+            # Iterate through nodes and prune edges
+            edges_removed = 0
+            total_edges_evaluated = 0
+            kl_score = 0.0
+            ablated_edges = []
+            for receiver in tqdm(ordered_nodes, desc="Evaluating edges"):
+                if receiver.name == "hook_resid_post":
+                    senders = self.full_graph.get_senders(receiver)
+                    for sender in senders:
+                        print(f"Evaluating edge: L{sender.layer}-{sender.name.split('_', 1)[1]} -> L{receiver.layer}-{receiver.name.split('_', 1)[1]}")
+                        edge = Edge(sender, receiver)
+                        # Temporarily remove the edge
+                        kl_divs = []
+                        for i, example in enumerate(self.dataset):
+                            clean_tokens = example.clean_tokens
+                            # Ablate the edge by zeroing out the sender's contribution (not the whole activation) only on receiver
+                            ablated_logits = self.run_with_edge_ablation(clean_tokens, edge, caches[i],
+                                                                         ablated_edges)
+                            kl_div = kl_divergence(clean_logits[i], ablated_logits)
+                            kl_divs.append(kl_div.item())
+                        avg_kl_div = np.mean(kl_divs)
+                        total_edges_evaluated += 1
+                        print(f"Avg KL Divergence = {avg_kl_div:.6f}")
+                        if avg_kl_div < self.threshold:
+                            self.circuit.remove_edge(edge)
+                            edges_removed += 1
+                            ablated_edges.append(edge)
+                            kl_score = avg_kl_div
+                            print(f"Edge removed.")
+                elif receiver.name == "hook_resid_mid":
+                    senders = self.full_graph.get_senders(receiver)
+                    for sender in senders:
+                        if sender.name == "hook_z":
+                            print(f"Evaluating edge: L{sender.layer}-Head{sender.head_idx} -> L{receiver.layer}-{receiver.name.split('_', 1)[1]}")
+                        else:
+                            print(f"Evaluating edge: L{sender.layer}-{sender.name.split('_', 1)[1]} -> L{receiver.layer}-{receiver.name.split('_', 1)[1]}")
+                        edge = Edge(sender, receiver)
+                        # Temporarily remove the edge
+                        kl_divs = []
+                        for i, example in enumerate(self.dataset):
+                            clean_tokens = example.clean_tokens
+                            # Ablate the edge by zeroing out the sender's contribution (not the whole activation) only on receiver
+                            ablated_logits = self.run_with_edge_ablation(clean_tokens, edge, caches[i],
+                                                                         ablated_edges)
+                            kl_div = kl_divergence(clean_logits[i], ablated_logits)
+                            kl_divs.append(kl_div.item())
+                        avg_kl_div = np.mean(kl_divs)
+                        total_edges_evaluated += 1
+                        print(f"Avg KL Divergence = {avg_kl_div:.6f}")
+                        if avg_kl_div < self.threshold:
+                            self.circuit.remove_edge(edge)
+                            edges_removed += 1
+                            ablated_edges.append(edge)
+                            kl_score = avg_kl_div
+                            print(f"Edge removed.")
+            # Compute final KL divergence for independent evaluation (add all hooks at the same time)
+            if self.method == "independent":
+                kl_score = self.get_final_performance(clean_logits=clean_logits, clean_caches=caches,
+                                                      ablated_edges=ablated_edges)
+
+            # Print summary of results
+            print(f"\nCircuit discovery complete!")
+            print(f"Edges evaluated: {total_edges_evaluated}")
+            print(f"Edges removed: {edges_removed}")
+            print(f"Final circuit edges: {len(self.circuit.edges)}")
+            print(f"Final KL divergence: {kl_score:.6f}")
+
+        elif self.mode == "node":
+            print(f"Starting node evaluation with threshold: {self.threshold}")
+            # Iterate through nodes and ablate them
+            nodes_removed = 0
+            total_nodes_evaluated = 0
+            kl_score = 0.0
+            ablated_nodes = []
+            for node in tqdm(ordered_nodes, desc="Evaluating nodes"):
+                if node.name in ['hook_resid_pre', 'hook_resid_mid', 'hook_resid_post', 'hook_mlp_out', 'hook_z']:
+                    if node.name == "hook_z":
+                        print(f"Evaluating node: L{node.layer}-Head{node.head_idx}")
+                    else:
+                        print(f"Evaluating node: L{node.layer}-{node.name.split('_', 1)[1]}")
+                    # Temporarily remove the node
+                    kl_divs = []
+                    for i, example in enumerate(self.dataset):
+                        clean_tokens = example.clean_tokens
+                        # Ablate the edge by zeroing out the sender's contribution (not the whole activation) only on receiver
+                        ablated_logits = self.run_with_node_ablation(clean_tokens, node, caches[i],
+                                                                     ablated_nodes)
+                        kl_div = kl_divergence(clean_logits[i], ablated_logits)
+                        kl_divs.append(kl_div.item())
+                    avg_kl_div = np.mean(kl_divs)
+                    total_nodes_evaluated += 1
+                    print(f"Avg KL Divergence = {avg_kl_div:.6f}")
+                    if avg_kl_div < self.threshold:
+                        self.circuit.remove_node(node)
+                        nodes_removed += 1
+                        ablated_nodes.append(node)
+                        kl_score = avg_kl_div
+                        print(f"Node removed.")
+            # Compute final KL divergence for independent evaluation (add all hooks at the same time)
+            if self.method == "independent":
+                kl_score = self.get_final_performance(clean_logits=clean_logits, clean_caches=caches,
+                                                      ablated_nodes=ablated_nodes)
 
             # Print summary of results
             print(f"\nCircuit discovery complete!")
@@ -316,12 +470,7 @@ class ACDC:
             receiver: Node,
             clean_cache: Dict[str, torch.Tensor]
     ) -> Callable:
-        """
-        Create a hook function for edge ablation.
-        For Pythia with parallel attention/MLP:
-        - resid_post = resid_pre + attn_out + mlp_out
-        - To ablate attention head output -> resid_post: resid_post = resid_post - specific head output
-        """
+        """Create a hook function for edge ablation."""
 
         def ablation_hook(activation, hook):
             # Get the clean sender contribution

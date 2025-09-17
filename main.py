@@ -5,6 +5,7 @@ from utilities.visualization import visualize_pythia_graph
 from algorithms.ActivationPatching import ActivationPatching
 from tasks.Factuality import FactualityDatasetBuilder
 import pandas as pd
+from utilities.GraphVisualizer import visualize_gemma_graph
 
 
 def run_circuit_discovery():
@@ -22,9 +23,11 @@ def run_circuit_discovery():
     # ACDC
     algorithm = ACDC(model, model_name, task="IOI", mode="edge", method="greedy", threshold=0.01)
     full_graph = algorithm.build_computational_graph()
-    visualize_pythia_graph(graph=full_graph, num_layers=model.cfg.n_layers, num_attention_heads=model.cfg.n_heads, figsize=(20,24))
-    circuit = algorithm.discover_circuit()
-    visualize_pythia_graph(graph=circuit, figsize=(20,24))
+    visualize_gemma_graph(graph=full_graph, num_layers=model.cfg.n_layers, num_attention_heads=model.cfg.n_heads)
+    #circuit = algorithm.discover_circuit()
+    #visualize_gemma_graph(graph=circuit, num_layers=model.cfg.n_layers, num_attention_heads=model.cfg.n_heads)
+    #visualize_pythia_graph(graph=full_graph, num_layers=model.cfg.n_layers, num_attention_heads=model.cfg.n_heads, figsize=(20,24))
+    #visualize_pythia_graph(graph=circuit, num_layers=model.cfg.n_layers, num_attention_heads=model.cfg.n_heads, figsize=(20,24))
 
 
 if __name__ == "__main__":
