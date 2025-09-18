@@ -13,13 +13,14 @@ class ACDC:
     for finding minimal circuits responsible for specific tasks.
     """
 
-    def __init__(self, model, model_name, task: str = "IOI", mode: str = "edge", method: str = "greedy", threshold: float = 0.1):
+    def __init__(self, model, model_name, task: str = "IOI", target: str = "edge", mode: str = "greedy", method: str = "pruning", threshold: float = 0.1):
 
         self.model = model
         self.model_name = model_name
         self.task_name = task
         self.threshold = threshold
         self.device = model.cfg.device
+        self.target = target
         self.mode = mode
         self.method = method
 
@@ -232,7 +233,7 @@ class ACDC:
 
 
     def discover_circuit(self):
-        """ Main method to perform circuit discovery using edge pruning. """
+        """ Main mode to perform circuit discovery using edge pruning. """
 
         print(f"Building computational graph for {self.model_name}...")
         self.full_graph = self.build_computational_graph()
@@ -242,24 +243,30 @@ class ACDC:
         print(f"Total nodes: {len(ordered_nodes)}")
         print(f"Total edges: {len(self.circuit.edges)}")
 
-        # Collect reference outputs
+        # Collect clean and corrupted reference outputs and caches
         clean_logits = []
-        caches = []
+        clean_caches = []
+        corrupted_logits = []
+        corrupted_caches = []
         for example in tqdm(self.dataset, desc="Collecting reference outputs"):
-            inputs = example.clean_tokens
+            clean_inputs = example.clean_tokens
+            corrupted_inputs = example.corrupted_tokens
             with torch.no_grad():
-                logits, cache = self.model.run_with_cache(inputs, return_type="logits")
-            clean_logits.append(logits)
-            caches.append(cache)
+                l_clean, c_clean = self.model.run_with_cache(clean_inputs, return_type="logits")
+                l_corr, c_corr = self.model.run_with_cache(corrupted_inputs, return_type="logits")
+            clean_logits.append(l_clean)
+            clean_caches.append(c_clean)
+            corrupted_logits.append(l_corr)
+            corrupted_caches.append(c_corr)
 
         if "pythia" in self.model_name:
-            self.circuit = self.discover_circuit_pythia(ordered_nodes, caches, clean_logits)
+            self.circuit = self.discover_circuit_pythia(ordered_nodes, clean_caches, corrupted_caches, clean_logits)
         elif "gemma" in self.model_name:
-            self.circuit = self.discover_circuit_gemma(ordered_nodes, caches, clean_logits)
+            self.circuit = self.discover_circuit_gemma(ordered_nodes, clean_caches, corrupted_caches, clean_logits)
         return self.circuit
 
-    def discover_circuit_pythia(self, ordered_nodes, caches, clean_logits):
-        if self.mode == "edge":
+    def discover_circuit_pythia(self, ordered_nodes, clean_caches, corrupted_caches, clean_logits):
+        if self.target == "edge":
             print(f"Starting edge evaluation with threshold: {self.threshold}")
             # Iterate through nodes and prune edges
             edges_removed = 0
@@ -271,16 +278,16 @@ class ACDC:
                     senders = self.full_graph.get_senders(receiver)
                     for sender in senders:
                         if sender.name == "hook_z":
-                            print(f"Evaluating edge: L{sender.layer}-{sender.name.split('_', 1)[1]} -> L{receiver.layer}-{receiver.name.split('_', 1)[1]}")
-                        else:
                             print(f"Evaluating edge: L{sender.layer}-Head{sender.head_idx} -> L{receiver.layer}-{receiver.name.split('_', 1)[1]}")
+                        else:
+                            print(f"Evaluating edge: L{sender.layer}-{sender.name.split('_', 1)[1]} -> L{receiver.layer}-{receiver.name.split('_', 1)[1]}")
                         edge = Edge(sender, receiver)
                         # Temporarily remove the edge
                         kl_divs = []
                         for i, example in enumerate(self.dataset):
                             clean_tokens = example.clean_tokens
                             # Ablate the edge by zeroing out the sender's contribution (not the whole activation) only on receiver
-                            ablated_logits = self.run_with_edge_ablation(clean_tokens, edge, caches[i], ablated_edges)
+                            ablated_logits = self.run_with_edge_patching(clean_tokens, edge, clean_caches[i], corrupted_caches[i], ablated_edges)
                             kl_div = kl_divergence(clean_logits[i], ablated_logits)
                             kl_divs.append(kl_div.item())
                         avg_kl_div = np.mean(kl_divs)
@@ -294,8 +301,8 @@ class ACDC:
                             print(f"Edge removed.")
 
             # Compute final KL divergence for independent evaluation (add all hooks at the same time)
-            if self.method == "independent":
-                kl_score = self.get_final_performance(clean_logits=clean_logits, clean_caches=caches, ablated_edges=ablated_edges)
+            if self.mode == "independent":
+                kl_score = self.get_final_performance(clean_logits=clean_logits, clean_caches=clean_caches, corrupted_caches=corrupted_caches, ablated_edges=ablated_edges)
 
             # Print summary of results
             print(f"\nCircuit discovery complete!")
@@ -304,7 +311,7 @@ class ACDC:
             print(f"Final circuit edges: {len(self.circuit.edges)}")
             print(f"Final KL divergence: {kl_score:.6f}")
 
-        elif self.mode == "node":
+        elif self.target == "node":
             print(f"Starting node evaluation with threshold: {self.threshold}")
             # Iterate through nodes and ablate them
             nodes_removed = 0
@@ -322,8 +329,7 @@ class ACDC:
                     for i, example in enumerate(self.dataset):
                         clean_tokens = example.clean_tokens
                         # Ablate the edge by zeroing out the sender's contribution (not the whole activation) only on receiver
-                        ablated_logits = self.run_with_node_ablation(clean_tokens, node, caches[i],
-                                                                     ablated_nodes)
+                        ablated_logits = self.run_with_node_patching(clean_tokens, node, corrupted_caches[i], ablated_nodes)
                         kl_div = kl_divergence(clean_logits[i], ablated_logits)
                         kl_divs.append(kl_div.item())
                     avg_kl_div = np.mean(kl_divs)
@@ -336,8 +342,8 @@ class ACDC:
                         kl_score = avg_kl_div
                         print(f"Node removed.")
             # Compute final KL divergence for independent evaluation (add all hooks at the same time)
-            if self.method == "independent":
-                kl_score = self.get_final_performance(clean_logits=clean_logits, clean_caches=caches, ablated_nodes=ablated_nodes)
+            if self.mode == "independent":
+                kl_score = self.get_final_performance(clean_logits=clean_logits, clean_caches=clean_caches, corrupted_caches=corrupted_caches, ablated_nodes=ablated_nodes)
 
             # Print summary of results
             print(f"\nCircuit discovery complete!")
@@ -348,8 +354,8 @@ class ACDC:
 
         return self.circuit
 
-    def discover_circuit_gemma(self, ordered_nodes, caches, clean_logits):
-        if self.mode == "edge":
+    def discover_circuit_gemma(self, ordered_nodes, clean_caches, corrupted_caches, clean_logits):
+        if self.target == "edge":
             print(f"Starting edge evaluation with threshold: {self.threshold}")
             # Iterate through nodes and prune edges
             edges_removed = 0
@@ -367,7 +373,7 @@ class ACDC:
                         for i, example in enumerate(self.dataset):
                             clean_tokens = example.clean_tokens
                             # Ablate the edge by zeroing out the sender's contribution (not the whole activation) only on receiver
-                            ablated_logits = self.run_with_edge_ablation(clean_tokens, edge, caches[i],
+                            ablated_logits = self.run_with_edge_patching(clean_tokens, edge, clean_caches[i], corrupted_caches[i],
                                                                          ablated_edges)
                             kl_div = kl_divergence(clean_logits[i], ablated_logits)
                             kl_divs.append(kl_div.item())
@@ -393,7 +399,7 @@ class ACDC:
                         for i, example in enumerate(self.dataset):
                             clean_tokens = example.clean_tokens
                             # Ablate the edge by zeroing out the sender's contribution (not the whole activation) only on receiver
-                            ablated_logits = self.run_with_edge_ablation(clean_tokens, edge, caches[i],
+                            ablated_logits = self.run_with_edge_patching(clean_tokens, edge, clean_caches[i], corrupted_caches[i],
                                                                          ablated_edges)
                             kl_div = kl_divergence(clean_logits[i], ablated_logits)
                             kl_divs.append(kl_div.item())
@@ -407,8 +413,8 @@ class ACDC:
                             kl_score = avg_kl_div
                             print(f"Edge removed.")
             # Compute final KL divergence for independent evaluation (add all hooks at the same time)
-            if self.method == "independent":
-                kl_score = self.get_final_performance(clean_logits=clean_logits, clean_caches=caches,
+            if self.mode == "independent":
+                kl_score = self.get_final_performance(clean_logits=clean_logits, clean_caches=clean_caches, corrupted_caches=corrupted_caches,
                                                       ablated_edges=ablated_edges)
 
             # Print summary of results
@@ -418,7 +424,7 @@ class ACDC:
             print(f"Final circuit edges: {len(self.circuit.edges)}")
             print(f"Final KL divergence: {kl_score:.6f}")
 
-        elif self.mode == "node":
+        elif self.target == "node":
             print(f"Starting node evaluation with threshold: {self.threshold}")
             # Iterate through nodes and ablate them
             nodes_removed = 0
@@ -436,7 +442,7 @@ class ACDC:
                     for i, example in enumerate(self.dataset):
                         clean_tokens = example.clean_tokens
                         # Ablate the edge by zeroing out the sender's contribution (not the whole activation) only on receiver
-                        ablated_logits = self.run_with_node_ablation(clean_tokens, node, caches[i],
+                        ablated_logits = self.run_with_node_patching(clean_tokens, node, corrupted_caches[i],
                                                                      ablated_nodes)
                         kl_div = kl_divergence(clean_logits[i], ablated_logits)
                         kl_divs.append(kl_div.item())
@@ -450,8 +456,8 @@ class ACDC:
                         kl_score = avg_kl_div
                         print(f"Node removed.")
             # Compute final KL divergence for independent evaluation (add all hooks at the same time)
-            if self.method == "independent":
-                kl_score = self.get_final_performance(clean_logits=clean_logits, clean_caches=caches,
+            if self.mode == "independent":
+                kl_score = self.get_final_performance(clean_logits=clean_logits, clean_caches=clean_caches, corrupted_caches=corrupted_caches,
                                                       ablated_nodes=ablated_nodes)
 
             # Print summary of results
@@ -464,42 +470,62 @@ class ACDC:
         return self.circuit
 
 
-    def create_edge_ablation_hook(
+    def create_edge_patching_hook(
             self,
             sender: Node,
             receiver: Node,
-            clean_cache: Dict[str, torch.Tensor]
+            clean_cache: Dict[str, torch.Tensor],
+            corrupted_cache: Dict[str, torch.Tensor]
     ) -> Callable:
         """Create a hook function for edge ablation."""
 
-        def ablation_hook(activation, hook):
+        def patching_hook(activation, hook):
             # Get the clean sender contribution
             if sender.full_activation not in clean_cache:
                 return activation
 
-            if sender.component_type == "attention":
-                sender_act = clean_cache[sender.full_activation]
-                sender_act = sender_act[:, :, sender.head_idx, :]
-                W_O = self.model.blocks[sender.layer - 1].attn.W_O
-                W_O_h = W_O[sender.head_idx]
-                sender_contribution = sender_act @ W_O_h
+            if self.method == "patching":
+                if sender.component_type == "attention":
+                    clean_sender_act = clean_cache[sender.full_activation]
+                    clean_sender_act = clean_sender_act[:, :, sender.head_idx, :]
+                    corrupted_sender_act = corrupted_cache[sender.full_activation]
+                    corrupted_sender_act = corrupted_sender_act[:, :, sender.head_idx, :]
+                    W_O = self.model.blocks[sender.layer - 1].attn.W_O
+                    W_O_h = W_O[sender.head_idx]
+                    clean_sender_contribution = clean_sender_act @ W_O_h
+                    corrupted_sender_contribution = corrupted_sender_act @ W_O_h
+                else:
+                    clean_sender_contribution = clean_cache[sender.full_activation]
+                    corrupted_sender_contribution = corrupted_cache[sender.full_activation]
+
+                # Subtract sender's contribution from the output
+                # This effectively removes the edge from sender to receiver
+                patched_activation = activation - clean_sender_contribution + corrupted_sender_contribution
             else:
-                sender_contribution = clean_cache[sender.full_activation]
+                if sender.component_type == "attention":
+                    sender_act = clean_cache[sender.full_activation]
+                    sender_act = sender_act[:, :, sender.head_idx, :]
+                    W_O = self.model.blocks[sender.layer - 1].attn.W_O
+                    W_O_h = W_O[sender.head_idx]
+                    sender_contribution = sender_act @ W_O_h
+                else:
+                    sender_contribution = clean_cache[sender.full_activation]
 
-            # Subtract sender's contribution from the output
-            # This effectively removes the edge from sender to receiver
-            ablated_activation = activation - sender_contribution
+                # Subtract sender's contribution from the output
+                # This effectively removes the edge from sender to receiver
+                patched_activation = activation - sender_contribution
 
-            return ablated_activation
+            return patched_activation
 
-        return ablation_hook
+        return patching_hook
 
 
-    def run_with_edge_ablation(
+    def run_with_edge_patching(
             self,
             inputs: torch.Tensor,
             edge_to_ablate: Edge,
             clean_cache: Dict[str, torch.Tensor],
+            corrupted_cache: Dict[str, torch.Tensor],
             ablated_edges: Optional[List[Edge]] = None
     ) -> torch.Tensor:
         """Run model with edge ablation."""
@@ -510,24 +536,26 @@ class ACDC:
         # In case of greedy evaluation, check if there are edges previously ablated and, if so, re-add the hooks for them
         if ablated_edges and self.mode == "greedy":
             for edge in ablated_edges:
-                hook = self.create_edge_ablation_hook(
+                hook = self.create_edge_patching_hook(
                     edge.sender,
                     edge.receiver,
-                    clean_cache
+                    clean_cache,
+                    corrupted_cache
                 )
                 if hasattr(self.model, 'add_hook'):
                     self.model.add_hook(edge.receiver.full_activation, hook)
 
         # Create ablation hook
-        ablation_hook = self.create_edge_ablation_hook(
+        patching_hook = self.create_edge_patching_hook(
             edge_to_ablate.sender,
             edge_to_ablate.receiver,
-            clean_cache
+            clean_cache,
+            corrupted_cache
         )
 
         # Register hook on the receiver
         if hasattr(self.model, 'add_hook'):
-            self.model.add_hook(edge_to_ablate.receiver.full_activation, ablation_hook)
+            self.model.add_hook(edge_to_ablate.receiver.full_activation, patching_hook)
 
         # Run forward pass
         with torch.no_grad():
@@ -536,27 +564,39 @@ class ACDC:
         return ablated_logits
 
 
-    def create_node_ablation_hook(self, node: Node) -> Callable:
+    def create_node_patching_hook(self, node: Node, corrupted_cache) -> Callable:
         """Create a hook function for node ablation."""
 
-        def ablation_hook(activation, hook):
-            # For attention heads, zero out only that head's output
-            if node.component_type == "attention":
-                ablated_activation = activation
-                ablated_activation[:, :, node.head_idx, :] = 0
+        def patching_hook(activation, hook):
+            if self.method == "patching":
+                # For attention heads, zero out only that head's output
+                if node.component_type == "attention":
+                    corr_act = corrupted_cache[node.full_activation]
+                    corr_act = corr_act[:, :, node.head_idx, :]
+                    patched_activation = activation
+                    patched_activation[:, :, node.head_idx, :] = corr_act[:, :, node.head_idx, :]
+                else:
+                    # Zero out the entire activation to ablate the node
+                    patched_activation = corrupted_cache[node.full_activation]
+                return patched_activation
             else:
-                # Zero out the entire activation to ablate the node
-                ablated_activation = torch.zeros_like(activation)
-            return ablated_activation
+                # For attention heads, zero out only that head's output
+                if node.component_type == "attention":
+                    patched_activation = activation
+                    patched_activation[:, :, node.head_idx, :] = 0
+                else:
+                    # Zero out the entire activation to ablate the node
+                    patched_activation = torch.zeros_like(activation)
+                return patched_activation
 
-        return ablation_hook
+        return patching_hook
 
 
-    def run_with_node_ablation(
+    def run_with_node_patching(
             self,
             inputs: torch.Tensor,
             node_to_ablate: Node,
-            clean_cache: Dict[str, torch.Tensor],
+            corrupted_cache: Dict[str, torch.Tensor],
             ablated_nodes: Optional[List[Node]] = None
             ) -> torch.Tensor:
         """Run model with node ablation."""
@@ -567,16 +607,16 @@ class ACDC:
         # In case of greedy evaluation, check if there are nodes previously ablated and, if so, re-add the hooks for them
         if ablated_nodes and self.mode == "greedy":
             for node in ablated_nodes:
-                hook = self.create_node_ablation_hook(node)
+                hook = self.create_node_patching_hook(node, corrupted_cache)
                 if hasattr(self.model, 'add_hook'):
                     self.model.add_hook(node.full_activation, hook)
 
         # Create ablation hook
-        ablation_hook = self.create_node_ablation_hook(node_to_ablate)
+        patching_hook = self.create_node_patching_hook(node_to_ablate, corrupted_cache)
 
         # Register hook on the node
         if hasattr(self.model, 'add_hook'):
-            self.model.add_hook(node_to_ablate.full_activation, ablation_hook)
+            self.model.add_hook(node_to_ablate.full_activation, patching_hook)
 
         # Run forward pass
         with torch.no_grad():
@@ -585,7 +625,7 @@ class ACDC:
         return ablated_logits
 
 
-    def get_final_performance(self, clean_logits, clean_caches, ablated_nodes: Optional[List[Node]] = None, ablated_edges: Optional[List[Edge]] = None):
+    def get_final_performance(self, clean_logits, clean_caches, corrupted_caches, ablated_nodes: Optional[List[Node]] = None, ablated_edges: Optional[List[Edge]] = None):
         """Evaluate final performance after all edges have been ablated."""
         kl_divs = []
         for i, example in enumerate(self.dataset):
@@ -595,10 +635,11 @@ class ACDC:
 
             if ablated_edges:
                 for edge in ablated_edges:
-                    hook = self.create_edge_ablation_hook(
+                    hook = self.create_edge_patching_hook(
                         edge.sender,
                         edge.receiver,
-                        clean_caches[i]
+                        clean_caches[i],
+                        corrupted_caches[i]
                     )
                     if hasattr(self.model, 'add_hook'):
                         self.model.add_hook(edge.receiver.full_activation, hook)
@@ -610,7 +651,7 @@ class ACDC:
 
             if ablated_nodes:
                 for node in ablated_nodes:
-                    hook = self.create_node_ablation_hook(node)
+                    hook = self.create_node_patching_hook(node)
                     if hasattr(self.model, 'add_hook'):
                         self.model.add_hook(node.full_activation, hook)
 
