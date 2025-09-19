@@ -1,6 +1,5 @@
 from dataclasses import dataclass
 from typing import List
-import torch
 import pandas as pd
 
 @dataclass
@@ -9,7 +8,7 @@ class FactualityExample:
     statement: str
     label: int
     prompt: str
-    prompt_tokens: List[str]
+    clean_tokens: List[str]
 
 
 class FactualityDatasetBuilder:
@@ -72,7 +71,7 @@ class FactualityDatasetBuilder:
             statement=example['statement'],
             label=example['label'],
             prompt=prompt,
-            prompt_tokens=prompt_tokens[0]
+            clean_tokens=prompt_tokens[0]
         )
 
     def build_dataset(self):
@@ -89,16 +88,3 @@ class FactualityDatasetBuilder:
             factuality_example = self.build_single_prompt(example)
             dataset.append(factuality_example)
         return dataset
-
-    #message_prefix = [{"role": "system", "content": SYSTEM_PROMPT}]
-#
-    #for e in examples:
-    #    message_prefix.append(
-    #        {
-    #            "role": "user",
-    #            "content": structure_user_prompt(
-    #                e["question"], e["answer"], e["ground_truth"]
-    #            ),
-    #        }
-    #    )
-    #    message_prefix.append({"role": "assistant", "content": str(e["evaluation"])})
