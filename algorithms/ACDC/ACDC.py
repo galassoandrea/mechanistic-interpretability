@@ -34,9 +34,6 @@ class ACDC:
         self.corrupted_caches = []
         self.corrupted_logits = []
 
-        # Hooks for intervention
-        self.hooks = []
-
         # Create dataset based on the task
         if task == "IOI":
             print("Building IOI dataset...")
@@ -51,7 +48,7 @@ class ACDC:
             dataset_builder = Factuality.FactualityDatasetBuilder(model)
             self.dataset = dataset_builder.build_dataset()
             # Keep only the first 10 examples for faster testing
-            self.dataset = self.dataset[:10]
+            self.dataset = self.dataset[:50]
 
     def build_computational_graph(self):
         """Build the full computational graph of the model."""

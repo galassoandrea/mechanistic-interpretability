@@ -160,6 +160,12 @@ def get_final_performance(
             logits.append(ablated_logits)
             labels.append(example.label)
     avg_kl_div = np.mean(kl_divs)
+    # Free some memory
+    model.reset_hooks()
+    del clean_caches
+    del clean_logits
+    logits = [t.cpu() for t in logits]
+    torch.cuda.empty_cache()
     if task_name == "Factuality":
         # Compute metrics for factuality evaluation
         evaluate_factuality(logits, labels, model)
@@ -172,3 +178,6 @@ def is_output_activation(full_activation, component_type):
     elif component_type == "mlp" and "hook_mlp_out" in full_activation:
         return True
     return False
+
+
+

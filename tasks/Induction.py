@@ -11,6 +11,15 @@ torch.manual_seed(42)
 np.random.seed(42)
 random.seed(42)
 
+def pad_sequences(tokens: List[torch.Tensor]) -> torch.Tensor:
+    """Pad each token sequence to the maximum length in the batch"""
+    max_length = max(token.shape[0] for token in tokens)
+    padded_tokens = [
+        F.pad(t, (0, max_length - t.shape[0]))
+        for t in tokens
+    ]
+    return torch.stack(padded_tokens, dim=0)
+
 @dataclass
 class InductionExample:
     """Represents a single Induction example with both clean and corrupted versions"""
@@ -109,15 +118,6 @@ class InductionDatasetBuilder:
             incorrect_token=incorrect_token
         )
 
-    def pad_sequences(self, tokens: List[torch.Tensor]) -> torch.Tensor:
-        """Pad each token sequence to the maximum length in the batch"""
-        max_length = max(token.shape[0] for token in tokens)
-        padded_tokens = [
-            F.pad(t, (0, max_length - t.shape[0]))
-            for t in tokens
-        ]
-        return torch.stack(padded_tokens, dim=0)
-
     def build_dataset(self, num_samples: int) -> List[InductionExample]:
         """Build a dataset with the specified number of examples"""
         dataset = []
@@ -130,8 +130,8 @@ class InductionDatasetBuilder:
             dataset.append(example)
 
         # Pad sequences to the maximum length
-        clean_tokens = self.pad_sequences(clean_tokens)
-        corrupted_tokens = self.pad_sequences(corrupted_tokens)
+        clean_tokens = pad_sequences(clean_tokens)
+        corrupted_tokens = pad_sequences(corrupted_tokens)
         # Update dataset with padded tokens
         for i, example in enumerate(dataset):
             example.clean_tokens = clean_tokens[i]
