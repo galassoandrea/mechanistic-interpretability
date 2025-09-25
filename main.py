@@ -29,30 +29,9 @@ def run_circuit_discovery():
     # visualize_pythia_graph(graph=full_graph, num_layers=model.cfg.n_layers, num_attention_heads=model.cfg.n_heads, figsize=(20,24))
     # visualize_pythia_graph(graph=circuit, num_layers=model.cfg.n_layers, num_attention_heads=model.cfg.n_heads, figsize=(20,24))
 
-    loader = algorithm.dataset
-
     all_logits = []
     all_labels = []
 
-    for batch in loader:
-        tokens = batch.clean_tokens
-        label = batch.label
-
-        # Move tokens to device
-        tokens = tokens.to(model.cfg.device)
-
-        with torch.no_grad():
-            output = model(tokens)
-            if hasattr(output, 'logits'):
-                logit = output.logits
-            else:
-                logit = output
-
-        # Keep data in batch format - much simpler!
-        all_logits.append(logit.cpu())
-        all_labels.append(label)
-
-    results = evaluate_factuality(all_logits, all_labels, model)
     for example in tqdm(algorithm.dataset, desc="Evaluating examples"):
         prompt_tokens = torch.tensor(example.clean_tokens).unsqueeze(0).to(model.cfg.device)
         with torch.no_grad():
@@ -66,6 +45,9 @@ def run_circuit_discovery():
 
     results = evaluate_factuality(all_logits, all_labels, model)
 
+    # Clean memory
+    del all_logits
+    del all_labels
 
     # Run ACDC on factuality task
     circuit = algorithm.discover_circuit()

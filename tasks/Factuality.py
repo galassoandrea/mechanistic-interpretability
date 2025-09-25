@@ -26,9 +26,8 @@ def load_data(path):
     final_df = final_df.sample(frac=1, random_state=42).reset_index(drop=True)
     return final_df
 
-def pad_sequences(tokens: List[torch.Tensor]) -> torch.Tensor:
+def pad_sequences(tokens: List[torch.Tensor], max_length) -> torch.Tensor:
     """Pad each token sequence to the maximum length in the batch"""
-    max_length = max(token.shape[0] for token in tokens)
     padded_tokens = [
         F.pad(t, (0, max_length - t.shape[0]))
         for t in tokens
@@ -69,7 +68,7 @@ class FactualityDatasetBuilder:
     """Builds a dataset for the Factuality task"""
 
     def __init__(self, model):
-        self.df = load_data("tasks/factuality_data")
+        self.df = pd.read_csv("tasks/factuality_data/elements_true_false.csv")#load_data("tasks/factuality_data")
         self.model = model
         self.system_role = ("You are a judge and your role is to judge whether the provided statement is true or false,"
                             " based on your knowledge. Answer with a 1 if the statement is true"
@@ -147,16 +146,16 @@ class FactualityDatasetBuilder:
         clean_prompt = f'{initial_prompt}\nStatement: {example["statement"]}\nEvaluation: '
         corrupted_statement = self.corrupt_sentence(example["statement"], example["topic"])
         corrupted_prompt = f'{initial_prompt}\nStatement: {corrupted_statement}\nEvaluation: '
-        clean_tokens = self.model.to_tokens(clean_prompt, prepend_bos=True)
-        corrupted_tokens = self.model.to_tokens(corrupted_prompt, prepend_bos=True)
+        clean_tokens = self.model.to_tokens(clean_prompt, prepend_bos=True).squeeze(0)
+        corrupted_tokens = self.model.to_tokens(corrupted_prompt, prepend_bos=True).squeeze(0)
         return FactualityExample(
             clean_statement=example['statement'],
             corrupted_statement=corrupted_statement,
             label=example['label'],
             clean_prompt=clean_prompt,
             corrupted_prompt=corrupted_prompt,
-            clean_tokens=clean_tokens[0],
-            corrupted_tokens=corrupted_tokens[0],
+            clean_tokens=clean_tokens,
+            corrupted_tokens=corrupted_tokens,
         )
 
     def build_dataset(self):
@@ -168,15 +167,16 @@ class FactualityDatasetBuilder:
             example = {
                 "statement": row['statement'],
                 "label": row['label'],
-                "topic": row['topic']
+                "topic": "elements"#row['topic']
             }
             factuality_example = self.build_single_prompt(example)
             clean_tokens.append(factuality_example.clean_tokens)
             corrupted_tokens.append(factuality_example.corrupted_tokens)
             dataset.append(factuality_example)
         # Pad sequences to the maximum length
-        padded_clean_tokens = pad_sequences(clean_tokens)
-        padded_corrupted_tokens = pad_sequences(corrupted_tokens)
+        max_length = max(token.shape[0] for token in clean_tokens)
+        padded_clean_tokens = pad_sequences(clean_tokens, max_length)
+        padded_corrupted_tokens = pad_sequences(corrupted_tokens, max_length)
         for i, example in enumerate(dataset):
             example.clean_tokens = padded_clean_tokens[i]
             example.corrupted_tokens = padded_corrupted_tokens[i]

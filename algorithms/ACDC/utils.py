@@ -179,5 +179,14 @@ def is_output_activation(full_activation, component_type):
         return True
     return False
 
-
-
+def filter_hooks(cache, model_name, layers):
+    hook_list = []
+    all_hooks = []
+    if "pythia" in model_name:
+        hook_list = ["attn.hook_z", "hook_resid_pre", "hook_resid_post", "hook_mlp_out"]
+    elif "gemma" in model_name:
+        hook_list = ["attn.hook_z", "hook_resid_pre", "hook_resid_mid", "hook_resid_post", "hook_mlp_out"]
+    for hook_name in hook_list:
+        hooks = [f"blocks.{l}.{hook_name}" for l in range(layers)]
+        all_hooks.extend(hooks)
+    return {k: v.detach().cpu() for k, v in cache.items() if k in all_hooks}

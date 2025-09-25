@@ -32,7 +32,6 @@ class ACDC:
         self.clean_caches = []
         self.clean_logits = []
         self.corrupted_caches = []
-        self.corrupted_logits = []
 
         # Create dataset based on the task
         if task == "IOI":
@@ -237,18 +236,17 @@ class ACDC:
         for example in tqdm(self.dataset, desc="Collecting reference outputs"):
             with torch.no_grad():
                 clean_inputs = example.clean_tokens
+                # Cache activations and keep only needed ones
                 l_clean, c_clean = self.model.run_with_cache(clean_inputs, return_type="logits")
+                c_clean = filter_hooks(c_clean, self.model_name, self.model.cfg.n_layers)
                 l_clean = l_clean.cpu()
-                c_clean = {k: v.cpu() for k, v in c_clean.items()}
                 self.clean_logits.append(l_clean)
                 self.clean_caches.append(c_clean)
                 if self.method == "patching":
                     # Also collect corrupted outputs for activation patching
                     corrupted_inputs = example.corrupted_tokens
-                    l_corr, c_corr = self.model.run_with_cache(corrupted_inputs, return_type="logits")
-                    l_corr = l_corr.cpu()
-                    c_corr = {k: v.cpu() for k, v in c_corr.items()}
-                    self.corrupted_logits.append(l_corr)
+                    _, c_corr = self.model.run_with_cache(corrupted_inputs, return_type="logits")
+                    c_corr = filter_hooks(c_corr, self.model_name, self.model.cfg.n_layers)
                     self.corrupted_caches.append(c_corr)
 
         if "pythia" in self.model_name:
