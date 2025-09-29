@@ -47,7 +47,7 @@ class ACDC:
             dataset_builder = Factuality.FactualityDatasetBuilder(model)
             self.dataset = dataset_builder.build_dataset()
             # Keep only the first 10 examples for faster testing
-            self.dataset = self.dataset[:50]
+            self.dataset = self.dataset[:10]
 
     def build_computational_graph(self):
         """Build the full computational graph of the model."""
@@ -248,6 +248,8 @@ class ACDC:
                     _, c_corr = self.model.run_with_cache(corrupted_inputs, return_type="logits")
                     c_corr = filter_hooks(c_corr, self.model_name, self.model.cfg.n_layers)
                     self.corrupted_caches.append(c_corr)
+        # Clear gpu
+        torch.cuda.empty_cache()
 
         if "pythia" in self.model_name:
             self.circuit = self.discover_circuit_pythia(ordered_nodes)
@@ -356,6 +358,9 @@ class ACDC:
             print(f"Nodes evaluated: {total_nodes_evaluated}")
             print(f"Nodes removed: {nodes_removed}")
             print(f"Final circuit nodes: {len(self.circuit.nodes)}")
+
+        # Clear gpu
+        torch.cuda.empty_cache()
 
         # Compute final KL divergence (add all hooks at the same time)
         kl_score = get_final_performance(
@@ -510,6 +515,9 @@ class ACDC:
             print(f"Nodes evaluated: {total_nodes_evaluated}")
             print(f"Nodes removed: {nodes_removed}")
             print(f"Final circuit nodes: {len(self.circuit.nodes)}")
+
+        # Clear gpu
+        torch.cuda.empty_cache()
 
         # Compute final KL divergence (add all hooks at the same time)
         kl_score = get_final_performance(
