@@ -171,14 +171,6 @@ def get_final_performance(
         evaluate_factuality(logits, labels, model)
     return avg_kl_div
 
-def is_output_activation(full_activation, component_type):
-    """ Determine if an activation is an output activation for a given component type."""
-    if component_type == "attention" and "attn.hook_z" in full_activation:
-        return True
-    elif component_type == "mlp" and "hook_mlp_out" in full_activation:
-        return True
-    return False
-
 def filter_hooks(cache, model_name, layers):
     hook_list = []
     all_hooks = []

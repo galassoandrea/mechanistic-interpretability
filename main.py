@@ -5,6 +5,7 @@ from algorithms.AttributionPatching.AttributionPatching import AttributionPatchi
 from utilities.evaluation import evaluate_factuality
 from utilities.GraphVisualizer import visualize_gemma_graph
 from tqdm import tqdm
+from utilities.ComputationalGraph import build_computational_graph
 
 from utilities.visualization import visualize_pythia_graph
 
@@ -21,8 +22,8 @@ def run_circuit_discovery():
     )
 
     # ACDC
-    algorithm = AttributionPatching(model, model_name)
-    #algorithm = ACDC(model, model_name, task="Factuality", target="edge", mode="greedy", method="patching", threshold=0.05)
+    #algorithm = AttributionPatching(model, model_name, task="IOI")
+    algorithm = ACDC(model, model_name, task="Factuality", target="edge", mode="greedy", method="patching", threshold=0.05)
     #full_graph = algorithm.build_computational_graph()
     #visualize_gemma_graph(graph=full_graph, num_layers=model.cfg.n_layers, num_attention_heads=model.cfg.n_heads)
     #circuit = algorithm.discover_circuit()
@@ -51,6 +52,8 @@ def run_circuit_discovery():
     #del all_labels
 
     # Run ACDC on factuality task
+    initial_graph = build_computational_graph(model, model_name)
+    visualize_pythia_graph(graph=initial_graph, num_layers=model.cfg.n_layers, num_attention_heads=model.cfg.n_heads, figsize=(20,24))
     circuit = algorithm.discover_circuit()
     visualize_pythia_graph(graph=circuit, num_layers=model.cfg.n_layers, num_attention_heads=model.cfg.n_heads, figsize=(20,24))
 

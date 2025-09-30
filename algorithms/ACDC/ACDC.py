@@ -4,7 +4,7 @@ from utilities.evaluation import kl_divergence
 import numpy as np
 from tqdm import tqdm
 from tasks import IOI, Induction, Factuality
-from utilities.ComputationalGraph import ComputationalGraph, Node, Edge
+from utilities.ComputationalGraph import Node, Edge, build_computational_graph
 
 class ACDC:
     """
@@ -49,183 +49,11 @@ class ACDC:
             # Keep only the first 10 examples for faster testing
             self.dataset = self.dataset[:10]
 
-    def build_computational_graph(self):
-        """Build the full computational graph of the model."""
-        graph = ComputationalGraph()
-        model_components = self.model.hook_dict.keys()
-        # Store nodes by layer and type for easier edge creation
-        nodes_by_layer = defaultdict(dict)
-
-        # Add embedding node
-        embed_node = Node(name="embed", layer=0, component_type="embedding", full_activation="hook_embed")
-        graph.add_node(embed_node)
-        nodes_by_layer[0]["embedding"] = embed_node
-        n_heads = self.model.cfg.n_heads
-
-        # Add all other nodes (attention, MLP, residual connections)
-        for full_activation in model_components:
-            if full_activation.startswith("blocks."):
-                if "attn" in full_activation:
-                    # Attention nodes
-                    layer = int(full_activation.split('.')[1]) + 1
-                    act_name = full_activation.rsplit(".", 1)[1]
-                    if act_name == "hook_z":
-                        for head_idx in range(n_heads):
-                            node = Node(
-                                name=act_name,
-                                layer=layer,
-                                component_type="attention",
-                                head_idx=head_idx,
-                                full_activation=full_activation
-                            )
-                            graph.add_node(node)
-                            if "attention" not in nodes_by_layer[layer]:
-                                nodes_by_layer[layer]["attention"] = []
-                            nodes_by_layer[layer]["attention"].append(node)
-                elif "mlp_out" in full_activation:
-                    # MLP nodes
-                    layer = int(full_activation.split('.')[1]) + 1
-                    act_name = full_activation.rsplit(".", 1)[1]
-                    node = Node(
-                        name=act_name,
-                        layer=layer,
-                        component_type="mlp",
-                        full_activation=full_activation
-                    )
-                    graph.add_node(node)
-                    if "mlp" not in nodes_by_layer[layer]:
-                        nodes_by_layer[layer]["mlp"] = []
-                    nodes_by_layer[layer]["mlp"].append(node)
-                elif "resid" in full_activation:
-                    # Residual nodes
-                    layer = int(full_activation.split('.')[1]) + 1
-                    act_name = full_activation.rsplit(".", 1)[1]
-                    node = Node(
-                        name=act_name,
-                        layer=layer,
-                        component_type="residual",
-                        full_activation=full_activation
-                    )
-                    graph.add_node(node)
-                    nodes_by_layer[layer][act_name] = node
-
-        # Create edges following transformer architecture
-        if "pythia" in self.model_name:
-            graph = self.create_pythia_edges(graph, nodes_by_layer)
-        elif "gemma" in self.model_name:
-            graph = self.create_gemma_edges(graph, nodes_by_layer)
-        return graph
-
-    def create_pythia_edges(self, graph, nodes_by_layer):
-        # Create edges following pythia model architecture
-        max_layer = self.model.cfg.n_layers
-        # Handle embedding to layer 1 connection
-        if 0 in nodes_by_layer and 1 in nodes_by_layer:
-            embed_node = nodes_by_layer[0]["embedding"]
-            layer_1_resid_pre = nodes_by_layer[1].get("hook_resid_pre")
-            if layer_1_resid_pre:
-                edge = Edge(sender=embed_node, receiver=layer_1_resid_pre)
-                graph.add_edge(edge)
-        for layer in range(1, max_layer + 1):
-            current_layer_nodes = nodes_by_layer[layer]
-            # Previous layer's resid_post -> current layer's resid_pre
-            if layer > 1:  # Skip for layer 1 (handled by embedding)
-                prev_resid_post = nodes_by_layer[layer - 1].get("hook_resid_post")
-                curr_resid_pre = current_layer_nodes.get("hook_resid_pre")
-                if prev_resid_post and curr_resid_pre:
-                    edge = Edge(sender=prev_resid_post, receiver=curr_resid_pre)
-                    graph.add_edge(edge)
-            # resid_pre -> attention (parallel path)
-            resid_pre = current_layer_nodes.get("hook_resid_pre")
-            if resid_pre and "attention" in current_layer_nodes:
-                for attn_head_node in current_layer_nodes["attention"]:
-                    edge = Edge(sender=resid_pre, receiver=attn_head_node)
-                    graph.add_edge(edge)
-            # resid_pre -> MLP (parallel path)
-            if resid_pre and "mlp" in current_layer_nodes:
-                for mlp_node in current_layer_nodes["mlp"]:
-                    edge = Edge(sender=resid_pre, receiver=mlp_node)
-                    graph.add_edge(edge)
-            # attention and MLP outputs -> resid_post (parallel combination)
-            resid_post = current_layer_nodes.get("hook_resid_post")
-            if resid_post:
-                # resid_pre -> resid_post
-                if resid_pre:
-                    edge = Edge(sender=resid_pre, receiver=resid_post)
-                    graph.add_edge(edge)
-                # Attention heads output -> resid_post
-                if "attention" in current_layer_nodes:
-                    for attn_head_node in current_layer_nodes["attention"]:
-                        if is_output_activation(attn_head_node.full_activation, "attention"):
-                            edge = Edge(sender=attn_head_node, receiver=resid_post)
-                            graph.add_edge(edge)
-                # MLP output -> resid_post
-                if "mlp" in current_layer_nodes:
-                    for mlp_node in current_layer_nodes["mlp"]:
-                        # Connect MLP output nodes to resid_post
-                        if is_output_activation(mlp_node.full_activation, "mlp"):
-                            edge = Edge(sender=mlp_node, receiver=resid_post)
-                            graph.add_edge(edge)
-        return graph
-
-    def create_gemma_edges(self, graph, nodes_by_layer):
-        # Create edges following gemma model architecture
-        max_layer = self.model.cfg.n_layers
-        if 0 in nodes_by_layer and 1 in nodes_by_layer:
-            embed_node = nodes_by_layer[0]["embedding"]
-            layer_1_resid_pre = nodes_by_layer[1].get("hook_resid_pre")
-            if layer_1_resid_pre:
-                edge = Edge(sender=embed_node, receiver=layer_1_resid_pre)
-                graph.add_edge(edge)
-        for layer in range(1, max_layer + 1):
-            current_layer_nodes = nodes_by_layer[layer]
-            # Previous layer's resid_post -> current layer's resid_pre
-            if layer > 1:  # Skip for layer 1 (handled by embedding)
-                prev_resid_post = nodes_by_layer[layer - 1].get("hook_resid_post")
-                curr_resid_pre = current_layer_nodes.get("hook_resid_pre")
-                if prev_resid_post and curr_resid_pre:
-                    edge = Edge(sender=prev_resid_post, receiver=curr_resid_pre)
-                    graph.add_edge(edge)
-            # resid_pre -> attention
-            resid_pre = current_layer_nodes.get("hook_resid_pre")
-            if resid_pre and "attention" in current_layer_nodes:
-                for attn_head_node in current_layer_nodes["attention"]:
-                    edge = Edge(sender=resid_pre, receiver=attn_head_node)
-                    graph.add_edge(edge)
-            # attention -> resid_mid
-            resid_mid = current_layer_nodes.get("hook_resid_mid")
-            if resid_mid and "attention" in current_layer_nodes:
-                for attn_head_node in current_layer_nodes["attention"]:
-                    if is_output_activation(attn_head_node.full_activation, "attention"):
-                        edge = Edge(sender=attn_head_node, receiver=resid_mid)
-                        graph.add_edge(edge)
-            # resid_pre -> resid_mid (skip connection)
-            if resid_pre and resid_mid:
-                edge = Edge(sender=resid_pre, receiver=resid_mid)
-                graph.add_edge(edge)
-            # resid_mid -> mlp
-            if resid_mid and "mlp" in current_layer_nodes:
-                for mlp_node in current_layer_nodes["mlp"]:
-                    edge = Edge(sender=resid_mid, receiver=mlp_node)
-                    graph.add_edge(edge)
-            # mlp output -> resid_post
-            resid_post = current_layer_nodes.get("hook_resid_post")
-            if resid_post and "mlp" in current_layer_nodes:
-                for mlp_node in current_layer_nodes["mlp"]:
-                    if is_output_activation(mlp_node.full_activation, "mlp"):
-                        edge = Edge(sender=mlp_node, receiver=resid_post)
-                        graph.add_edge(edge)
-            # resid_mid -> resid_post (skip connection)
-            if resid_mid and resid_post:
-                edge = Edge(sender=resid_mid, receiver=resid_post)
-                graph.add_edge(edge)
-        return graph
-
     def discover_circuit(self):
         """ Main mode to perform circuit discovery using edge pruning. """
 
         print(f"Building computational graph for {self.model_name}...")
-        self.full_graph = self.build_computational_graph()
+        self.full_graph = build_computational_graph(self.model, self.model_name)
         self.circuit = self.full_graph.copy()
         ordered_nodes = self.circuit.topological_sort()
 

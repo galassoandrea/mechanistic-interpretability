@@ -1,10 +1,10 @@
 from collections import defaultdict
 from algorithms.ACDC.utils import *
-from utilities.evaluation import logits_to_logit_diff
+from utilities.evaluation import logits_to_logit_diff, factuality_nll_metric
 import numpy as np
 from tqdm import tqdm
 from tasks import IOI, Induction, Factuality
-from utilities.ComputationalGraph import ComputationalGraph, Node, Edge
+from utilities.ComputationalGraph import ComputationalGraph, Node, Edge, build_computational_graph
 import torch
 
 
@@ -42,6 +42,7 @@ class AttributionPatching:
             print("Building IOI dataset...")
             dataset_builder = IOI.IOIDatasetBuilder(model)
             self.dataset = dataset_builder.build_dataset(num_samples=10)
+            self.metric = logits_to_logit_diff
         elif task == "induction":
             print("Building Induction dataset...")
             dataset_builder = Induction.InductionDatasetBuilder(model)
@@ -51,199 +52,14 @@ class AttributionPatching:
             dataset_builder = Factuality.FactualityDatasetBuilder(model)
             self.dataset = dataset_builder.build_dataset()
             self.dataset = self.dataset[:10]
+            self.metric = factuality_nll_metric
 
-    def build_computational_graph(self):
-        """Build the full computational graph of the model."""
-        graph = ComputationalGraph()
-        model_components = self.model.hook_dict.keys()
-        nodes_by_layer = defaultdict(dict)
 
-        # Add embedding node
-        embed_node = Node(name="embed", layer=0, component_type="embedding", full_activation="hook_embed")
-        graph.add_node(embed_node)
-        nodes_by_layer[0]["embedding"] = embed_node
-        n_heads = self.model.cfg.n_heads
-
-        # Add all other nodes (attention, MLP, residual connections)
-        for full_activation in model_components:
-            if full_activation.startswith("blocks."):
-                if "attn" in full_activation:
-                    # Attention nodes
-                    layer = int(full_activation.split('.')[1]) + 1
-                    act_name = full_activation.rsplit(".", 1)[1]
-                    if act_name == "hook_z":
-                        for head_idx in range(n_heads):
-                            node = Node(
-                                name=act_name,
-                                layer=layer,
-                                component_type="attention",
-                                head_idx=head_idx,
-                                full_activation=full_activation
-                            )
-                            graph.add_node(node)
-                            if "attention" not in nodes_by_layer[layer]:
-                                nodes_by_layer[layer]["attention"] = []
-                            nodes_by_layer[layer]["attention"].append(node)
-                elif "mlp_out" in full_activation:
-                    # MLP nodes
-                    layer = int(full_activation.split('.')[1]) + 1
-                    act_name = full_activation.rsplit(".", 1)[1]
-                    node = Node(
-                        name=act_name,
-                        layer=layer,
-                        component_type="mlp",
-                        full_activation=full_activation
-                    )
-                    graph.add_node(node)
-                    if "mlp" not in nodes_by_layer[layer]:
-                        nodes_by_layer[layer]["mlp"] = []
-                    nodes_by_layer[layer]["mlp"].append(node)
-                elif "resid" in full_activation:
-                    # Residual nodes
-                    layer = int(full_activation.split('.')[1]) + 1
-                    act_name = full_activation.rsplit(".", 1)[1]
-                    node = Node(
-                        name=act_name,
-                        layer=layer,
-                        component_type="residual",
-                        full_activation=full_activation
-                    )
-                    graph.add_node(node)
-                    nodes_by_layer[layer][act_name] = node
-
-        # Create edges following transformer architecture
-        if "pythia" in self.model_name:
-            graph = self.create_pythia_edges(graph, nodes_by_layer)
-        elif "gemma" in self.model_name:
-            graph = self.create_gemma_edges(graph, nodes_by_layer)
-        return graph
-
-    def create_pythia_edges(self, graph, nodes_by_layer):
-        """Create edges following pythia model architecture (reuses ACDC logic)."""
-        max_layer = self.model.cfg.n_layers
-
-        # Handle embedding to layer 1 connection
-        if 0 in nodes_by_layer and 1 in nodes_by_layer:
-            embed_node = nodes_by_layer[0]["embedding"]
-            layer_1_resid_pre = nodes_by_layer[1].get("hook_resid_pre")
-            if layer_1_resid_pre:
-                edge = Edge(sender=embed_node, receiver=layer_1_resid_pre)
-                graph.add_edge(edge)
-
-        for layer in range(1, max_layer + 1):
-            current_layer_nodes = nodes_by_layer[layer]
-
-            # Previous layer's resid_post -> current layer's resid_pre
-            if layer > 1:
-                prev_resid_post = nodes_by_layer[layer - 1].get("hook_resid_post")
-                curr_resid_pre = current_layer_nodes.get("hook_resid_pre")
-                if prev_resid_post and curr_resid_pre:
-                    edge = Edge(sender=prev_resid_post, receiver=curr_resid_pre)
-                    graph.add_edge(edge)
-
-            # resid_pre -> attention (parallel path)
-            resid_pre = current_layer_nodes.get("hook_resid_pre")
-            if resid_pre and "attention" in current_layer_nodes:
-                for attn_head_node in current_layer_nodes["attention"]:
-                    edge = Edge(sender=resid_pre, receiver=attn_head_node)
-                    graph.add_edge(edge)
-
-            # resid_pre -> MLP (parallel path)
-            if resid_pre and "mlp" in current_layer_nodes:
-                for mlp_node in current_layer_nodes["mlp"]:
-                    edge = Edge(sender=resid_pre, receiver=mlp_node)
-                    graph.add_edge(edge)
-
-            # attention and MLP outputs -> resid_post
-            resid_post = current_layer_nodes.get("hook_resid_post")
-            if resid_post:
-                # resid_pre -> resid_post
-                if resid_pre:
-                    edge = Edge(sender=resid_pre, receiver=resid_post)
-                    graph.add_edge(edge)
-
-                # Attention heads output -> resid_post
-                if "attention" in current_layer_nodes:
-                    for attn_head_node in current_layer_nodes["attention"]:
-                        if is_output_activation(attn_head_node.full_activation, "attention"):
-                            edge = Edge(sender=attn_head_node, receiver=resid_post)
-                            graph.add_edge(edge)
-
-                # MLP output -> resid_post
-                if "mlp" in current_layer_nodes:
-                    for mlp_node in current_layer_nodes["mlp"]:
-                        if is_output_activation(mlp_node.full_activation, "mlp"):
-                            edge = Edge(sender=mlp_node, receiver=resid_post)
-                            graph.add_edge(edge)
-        return graph
-
-    def create_gemma_edges(self, graph, nodes_by_layer):
-        """Create edges following gemma model architecture (reuses ACDC logic)."""
-        max_layer = self.model.cfg.n_layers
-
-        if 0 in nodes_by_layer and 1 in nodes_by_layer:
-            embed_node = nodes_by_layer[0]["embedding"]
-            layer_1_resid_pre = nodes_by_layer[1].get("hook_resid_pre")
-            if layer_1_resid_pre:
-                edge = Edge(sender=embed_node, receiver=layer_1_resid_pre)
-                graph.add_edge(edge)
-
-        for layer in range(1, max_layer + 1):
-            current_layer_nodes = nodes_by_layer[layer]
-
-            # Previous layer's resid_post -> current layer's resid_pre
-            if layer > 1:
-                prev_resid_post = nodes_by_layer[layer - 1].get("hook_resid_post")
-                curr_resid_pre = current_layer_nodes.get("hook_resid_pre")
-                if prev_resid_post and curr_resid_pre:
-                    edge = Edge(sender=prev_resid_post, receiver=curr_resid_pre)
-                    graph.add_edge(edge)
-
-            # resid_pre -> attention
-            resid_pre = current_layer_nodes.get("hook_resid_pre")
-            if resid_pre and "attention" in current_layer_nodes:
-                for attn_head_node in current_layer_nodes["attention"]:
-                    edge = Edge(sender=resid_pre, receiver=attn_head_node)
-                    graph.add_edge(edge)
-
-            # attention -> resid_mid
-            resid_mid = current_layer_nodes.get("hook_resid_mid")
-            if resid_mid and "attention" in current_layer_nodes:
-                for attn_head_node in current_layer_nodes["attention"]:
-                    if is_output_activation(attn_head_node.full_activation, "attention"):
-                        edge = Edge(sender=attn_head_node, receiver=resid_mid)
-                        graph.add_edge(edge)
-
-            # resid_pre -> resid_mid (skip connection)
-            if resid_pre and resid_mid:
-                edge = Edge(sender=resid_pre, receiver=resid_mid)
-                graph.add_edge(edge)
-
-            # resid_mid -> mlp
-            if resid_mid and "mlp" in current_layer_nodes:
-                for mlp_node in current_layer_nodes["mlp"]:
-                    edge = Edge(sender=resid_mid, receiver=mlp_node)
-                    graph.add_edge(edge)
-
-            # mlp output -> resid_post
-            resid_post = current_layer_nodes.get("hook_resid_post")
-            if resid_post and "mlp" in current_layer_nodes:
-                for mlp_node in current_layer_nodes["mlp"]:
-                    if is_output_activation(mlp_node.full_activation, "mlp"):
-                        edge = Edge(sender=mlp_node, receiver=resid_post)
-                        graph.add_edge(edge)
-
-            # resid_mid -> resid_post (skip connection)
-            if resid_mid and resid_post:
-                edge = Edge(sender=resid_mid, receiver=resid_post)
-                graph.add_edge(edge)
-        return graph
-
-    def discover_circuit(self):
+    def discover_circuit(self, threshold_percentile=10):
         """ Main mode to perform circuit discovery using edge attribution patching. """
 
         print(f"Building computational graph for {self.model_name}...")
-        self.full_graph = self.build_computational_graph()
+        self.full_graph = build_computational_graph(self.model, self.model_name)
         self.circuit = self.full_graph.copy()
         ordered_nodes = self.circuit.topological_sort()
 
@@ -260,11 +76,63 @@ class AttributionPatching:
 
         edge_attributions = {k: np.mean(v) for k,v in edge_attributions.items()}
         self.edge_attributions = edge_attributions
-        self.create_circuit_from_attributions()
+
+        threshold = np.percentile(list(edge_attributions.values()), threshold_percentile)
+
+        if self.target == "edge":
+            # Sort edges by attribution score
+            sorted_edges = sorted(
+                self.edge_attributions.items(),
+                key=lambda x: x[1],
+                reverse=True
+            )
+
+            # Keep edges above threshold
+            removed_edges = 0
+            total_edges = len(sorted_edges)
+
+            for edge, attribution in sorted_edges:
+                if attribution < self.threshold:
+                    self.circuit.remove_edge(edge)
+                    if edge.sender.name == "hook_z":
+                        print(
+                            f"Removed edge: L{edge.sender.layer}-Head{edge.sender.head_idx} -> L{edge.receiver.layer}-{edge.receiver.name.split('_', 1)[1]}")
+                    else:
+                        print(
+                            f"Removed edge: L{edge.sender.layer}-{edge.sender.name.split('_', 1)[1]} -> L{edge.receiver.layer}-{edge.receiver.name.split('_', 1)[1]}")
+                    removed_edges += 1
+
+            print(f"\nAttribution Patching complete!")
+            print(f"Total edges evaluated: {total_edges}")
+            print(f"Edges removed (below threshold {self.threshold}): {removed_edges}")
+            print(f"Final circuit edges: {len(self.circuit.edges)}")
+
+        elif self.target == "node":
+            # Sort nodes by attribution score
+            sorted_nodes = sorted(
+                self.node_attributions.items(),
+                key=lambda x: x[1],
+                reverse=True
+            )
+
+            # Remove nodes above threshold and their edges
+            removed_nodes = 0
+            for node, attribution in sorted_nodes:
+                if attribution < self.threshold:
+                    self.circuit.remove_node(node)
+                    print(f"Removed node {node.full_activation}")
+                    removed_nodes += 1
+
+            print(f"\nAttribution Patching complete!")
+            print(f"Total nodes evaluated: {len(sorted_nodes)}")
+            print(f"Nodes removed (below threshold {self.threshold}): {removed_nodes}")
+            print(f"Final circuit edges: {len(self.circuit.edges)}")
 
         # Print attribution scores
         for k, v in self.edge_attributions.items():
-            print(f"{k.sender.full_activation} -> {k.receiver.full_activation}: {v}")
+            print(f"{k}: {v}")
+
+        return self.circuit
     
     def compute_example_attributions(self, example):
         """
@@ -273,18 +141,18 @@ class AttributionPatching:
         """
 
         # Get clean forward activations and backward gradients (w.r.t. activations)
-        clean_value, clean_cache, clean_grad_cache = self.get_cache_fwd_and_bwd(
-            example.clean_tokens.to(self.device),
-            lambda out, toks: logits_to_logit_diff(out, example.correct_token, example.incorrect_token)
-        )
+
+        # Get clean forward activations and backward gradients
+        clean_value, clean_cache, clean_grad_cache = self.get_cache_fwd_and_bwd(example)
 
         # Get corrupted forward activations only (no grads required)
-        corrupted_cache = self.get_corrupted_cache(example.corrupted_tokens.to(self.device))
+        corrupted_cache = self.get_corrupted_cache(example)
 
         # Compute per-edge attributions
         attributions = {}
         for edge in self.full_graph.edges:
             sender_name = edge.sender.full_activation
+            receiver_name = edge.receiver.full_activation
             if "embed" in sender_name:
                 continue
             # get forward activation (clean) and backward grad (clean)
@@ -338,7 +206,7 @@ class AttributionPatching:
 
         return attributions
 
-    def get_cache_fwd_and_bwd(self, tokens, metric_fn):
+    def get_cache_fwd_and_bwd(self, example):
         """
         Registers forward and backward hooks, runs forward and backward on tokens,
         and returns (scalar_value, forward_cache_dict, backward_grad_cache_dict).
@@ -364,16 +232,16 @@ class AttributionPatching:
             self.model.add_hook(node.full_activation, backward_cache_hook, "bwd")
 
         # forward -> metric -> backward
-        out = self.model(tokens)
-        value = metric_fn(out, tokens)
+        out = self.model(example.clean_tokens.to(self.device))
+        value = self.metric(out, example, self.model)
         if not torch.is_tensor(value):
-            value = torch.tensor(value, device=tokens.device, dtype=torch.float32)
+            value = torch.tensor(value, device=example.clean_tokens.device, dtype=torch.float32)
         value.backward()
 
         self.model.reset_hooks()
         return value.item(), forward_cache, backward_cache
 
-    def get_corrupted_cache(self, tokens):
+    def get_corrupted_cache(self, example):
         self.model.reset_hooks()
         needed_hooks = ["hook_z", "resid_pre", "resid_mid", "resid_post", "mlp_out"]
         corrupted_cache = {}
@@ -386,61 +254,9 @@ class AttributionPatching:
             self.model.add_hook(node.full_activation, forward_cache_hook, "fwd")
 
         with torch.no_grad():
-            _ = self.model(tokens.to(self.device))
+            _ = self.model(example.corrupted_tokens.to(self.device))
 
         self.model.reset_hooks()
         return corrupted_cache
 
-    def create_circuit_from_attributions(self):
-        """Create circuit by thresholding attribution scores."""
 
-        if self.target == "edge":
-            # Sort edges by attribution score
-            sorted_edges = sorted(
-                self.edge_attributions.items(),
-                key=lambda x: x[1],
-                reverse=True
-            )
-
-            # Keep edges above threshold
-            removed_edges = 0
-            total_edges = len(sorted_edges)
-
-            for edge, attribution in sorted_edges:
-                if attribution <= self.threshold:
-                    self.circuit.remove_edge(edge)
-                    if edge.sender.name == "hook_z":
-                        print(
-                            f"Removed edge: L{edge.sender.layer}-Head{edge.sender.head_idx} -> L{edge.receiver.layer}-{edge.receiver.name.split('_', 1)[1]}")
-                    else:
-                        print(
-                            f"Removed edge: L{edge.sender.layer}-{edge.sender.name.split('_', 1)[1]} -> L{edge.receiver.layer}-{edge.receiver.name.split('_', 1)[1]}")
-                    removed_edges += 1
-
-            print(f"\nAttribution Patching complete!")
-            print(f"Total edges evaluated: {total_edges}")
-            print(f"Edges removed (below threshold {self.threshold}): {removed_edges}")
-            print(f"Final circuit edges: {len(self.circuit.edges)}")
-
-        elif self.target == "node":
-            # Sort nodes by attribution score
-            sorted_nodes = sorted(
-                self.node_attributions.items(),
-                key=lambda x: x[1],
-                reverse=True
-            )
-
-            # Remove nodes above threshold and their edges
-            removed_nodes = 0
-            for node, attribution in sorted_nodes:
-                if attribution <= self.threshold:
-                    self.circuit.remove(node)
-                    print(f"Removed node {node.full_activation}")
-                    removed_nodes += 1
-
-            print(f"\nAttribution Patching complete!")
-            print(f"Total nodes evaluated: {len(sorted_nodes)}")
-            print(f"Nodes removed (below threshold {self.threshold}): {removed_nodes}")
-            print(f"Final circuit edges: {len(self.circuit.edges)}")
-
-        return self.circuit
