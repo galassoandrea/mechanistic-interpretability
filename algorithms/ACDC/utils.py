@@ -5,70 +5,34 @@ import numpy as np
 from utilities.ComputationalGraph import Node, Edge
 
 def create_edge_patching_hook(
-        model,
         method,
-        sender: Node,
-        receiver: Node,
-        clean_cache: Dict[str, torch.Tensor],
-        corrupted_cache: Optional[Dict[str, torch.Tensor]] = None
+        clean_sender_contribution: torch.Tensor,
+        corrupted_sender_contribution: Optional[torch.Tensor] = None
 ) -> Callable:
     """Create a hook function for edge pruning/patching."""
 
     def patching_hook(activation, hook):
-        # Get the clean sender contribution
-        if sender.full_activation not in clean_cache:
-            return activation
-
-        if method == "patching" and corrupted_cache:
-            if sender.component_type == "attention":
-                clean_sender_act = clean_cache[sender.full_activation]
-                clean_sender_act = clean_sender_act[:, :, sender.head_idx, :].to(model.cfg.device)
-                corrupted_sender_act = corrupted_cache[sender.full_activation]
-                corrupted_sender_act = corrupted_sender_act[:, :, sender.head_idx, :].to(model.cfg.device)
-                W_O = model.blocks[sender.layer - 1].attn.W_O
-                W_O_h = W_O[sender.head_idx]
-                clean_sender_contribution = clean_sender_act @ W_O_h
-                corrupted_sender_contribution = corrupted_sender_act @ W_O_h
-            else:
-                clean_sender_contribution = clean_cache[sender.full_activation].to(model.cfg.device)
-                corrupted_sender_contribution = corrupted_cache[sender.full_activation].to(model.cfg.device)
-            # Subtract sender's contribution from the output
+        # Subtract sender's contribution from the output
+        if method == "patching":
             patched_activation = activation - clean_sender_contribution + corrupted_sender_contribution
         else:
-            if sender.component_type == "attention":
-                sender_act = clean_cache[sender.full_activation]
-                sender_act = sender_act[:, :, sender.head_idx, :].to(model.cfg.device)
-                W_O = model.blocks[sender.layer - 1].attn.W_O
-                W_O_h = W_O[sender.head_idx]
-                sender_contribution = sender_act @ W_O_h
-            else:
-                sender_contribution = clean_cache[sender.full_activation].to(model.cfg.device)
-            # Subtract sender's contribution from the output
-            patched_activation = activation - sender_contribution
+            patched_activation = activation - clean_sender_contribution
 
         return patched_activation
 
     return patching_hook
 
 def create_node_patching_hook(
-        model,
         method,
         node: Node,
-        corrupted_cache: Optional[Dict[str, torch.Tensor]] = None
+        corrupted_activation: Optional = None
 ) -> Callable:
     """Create a hook function for node ablation/patching."""
 
     def patching_hook(activation, hook):
-        if method == "patching" and corrupted_cache:
-            # For attention heads, patch only that head's output
-            if node.component_type == "attention":
-                corr_act = corrupted_cache[node.full_activation]
-                corr_act = corr_act[:, :, node.head_idx, :]
-                patched_activation = activation
-                patched_activation[:, :, node.head_idx, :] = corr_act
-            else:
-                patched_activation = corrupted_cache[node.full_activation]
-            return patched_activation.to(model.cfg.device)
+        if method == "patching":
+            patched_activation = corrupted_activation
+            return patched_activation
         else:
             # For attention heads, patch only that head's output
             if node.component_type == "attention":
@@ -76,62 +40,58 @@ def create_node_patching_hook(
                 patched_activation[:, :, node.head_idx, :] = 0
             else:
                 patched_activation = torch.zeros_like(activation)
-            return patched_activation.to(model.cfg.device)
+            return patched_activation
 
     return patching_hook
 
 def add_all_hooks(
         model,
         method,
-        clean_cache,
-        corrupted_cache,
+        i,
+        clean_sender_contributions,
+        corrupted_sender_contributions,
         ablated_nodes: Optional[List[Node]] = None,
         ablated_edges: Optional[List[Edge]] = None):
     """Add hooks for all activations in the circuit."""
     if ablated_edges != [] and ablated_edges is not None:
-        if method == "patching" and corrupted_cache:
-            for edge in ablated_edges:
+        for edge in ablated_edges:
+            sender_id = get_sender_id(edge.sender)
+            if method == "patching":
                 hook = create_edge_patching_hook(
-                    model,
                     method,
-                    edge.sender,
-                    edge.receiver,
-                    clean_cache,
-                    corrupted_cache
+                    clean_sender_contributions[(sender_id,i)],
+                    corrupted_sender_contributions[(sender_id,i)]
                 )
                 if hasattr(model, 'add_hook'):
                     model.add_hook(edge.receiver.full_activation, hook)
-        else:
-            for edge in ablated_edges:
+            else:
                 hook = create_edge_patching_hook(
-                    model,
                     method,
-                    edge.sender,
-                    edge.receiver,
-                    clean_cache
+                    clean_sender_contributions[(sender_id,i)]
                 )
                 if hasattr(model, 'add_hook'):
                     model.add_hook(edge.receiver.full_activation, hook)
     if ablated_nodes != [] and ablated_nodes is not None:
-        if method == "patching" and corrupted_cache:
+        if method == "patching":
             for node in ablated_nodes:
-                hook = create_node_patching_hook(model, method, node, corrupted_cache)
+                sender_id = get_sender_id(node)
+                hook = create_node_patching_hook(method, node, corrupted_sender_contributions[(sender_id,i)])
                 if hasattr(model, 'add_hook'):
                     model.add_hook(node.full_activation, hook)
         else:
             for node in ablated_nodes:
-                hook = create_node_patching_hook(model, method, node)
+                hook = create_node_patching_hook(method, node)
                 if hasattr(model, 'add_hook'):
                     model.add_hook(node.full_activation, hook)
-                    
+
 def get_final_performance(
         model,
         method,
         dataset,
         task_name,
         clean_logits,
-        clean_caches,
-        corrupted_caches,
+        clean_sender_contributions,
+        corrupted_sender_contributions,
         ablated_nodes: Optional[List[Node]] = None,
         ablated_edges: Optional[List[Edge]] = None
 ):
@@ -143,15 +103,15 @@ def get_final_performance(
     for i, example in enumerate(dataset):
         # Clear previous hooks
         model.reset_hooks()
-        
+
         # Add all hooks for patched edges/nodes
         if method == "patching":
-            add_all_hooks(model, method, clean_caches[i], corrupted_caches[i],
+            add_all_hooks(model, method, i, clean_sender_contributions, corrupted_sender_contributions,
                            ablated_nodes, ablated_edges)
         else:
-            add_all_hooks(model, method, clean_caches[i], None,
+            add_all_hooks(model, method, i, clean_sender_contributions, None,
                            ablated_nodes, ablated_edges)
-            
+
         with torch.no_grad():
             ablated_logits = model(example.clean_tokens)
         kl_div = kl_divergence(clean_logits[i].to(model.cfg.device), ablated_logits)
@@ -162,7 +122,7 @@ def get_final_performance(
     avg_kl_div = np.mean(kl_divs)
     # Free some memory
     model.reset_hooks()
-    del clean_caches
+    del clean_sender_contributions
     del clean_logits
     logits = [t.cpu() for t in logits]
     torch.cuda.empty_cache()
@@ -182,3 +142,11 @@ def filter_hooks(cache, model_name, layers):
         hooks = [f"blocks.{l}.{hook_name}" for l in range(layers)]
         all_hooks.extend(hooks)
     return {k: v.detach().cpu() for k, v in cache.items() if k in all_hooks}
+
+def get_sender_id(node: Node) -> str:
+    """Get the sender ID string for a given node."""
+    if node.component_type == "attention":
+        sender_id = f"L{node.layer}-Head{node.head_idx}"
+    else:
+        sender_id = f"L{node.layer}-{node.name.split('_', 1)[1]}"
+    return sender_id

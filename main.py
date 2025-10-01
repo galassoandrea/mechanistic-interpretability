@@ -23,7 +23,7 @@ def run_circuit_discovery():
 
     # ACDC
     #algorithm = AttributionPatching(model, model_name, task="IOI")
-    algorithm = ACDC(model, model_name, task="Factuality", target="edge", mode="greedy", method="patching", threshold=0.05)
+    algorithm = ACDC(model, model_name, task="IOI", target="edge", mode="greedy", method="patching", threshold=0.05)
     #full_graph = algorithm.build_computational_graph()
     #visualize_gemma_graph(graph=full_graph, num_layers=model.cfg.n_layers, num_attention_heads=model.cfg.n_heads)
     #circuit = algorithm.discover_circuit()
