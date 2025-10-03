@@ -8,24 +8,6 @@ from torch.utils.data import Dataset
 import torch.nn.functional as F
 import os
 
-def load_data(path):
-    all_files = glob.glob(path + "/*.csv")
-    dfs = []
-    for f in all_files:
-        # load one csv
-        df = pd.read_csv(f)
-        # extract filename without extension
-        filename = os.path.splitext(os.path.basename(f))[0]
-        # take only the part before the first "_"
-        topic = filename.split("_")[0]
-        df["topic"] = topic
-        dfs.append(df)
-    # concatenate all dfs
-    final_df = pd.concat(dfs, ignore_index=True)
-    # shuffle
-    final_df = final_df.sample(frac=1, random_state=42).reset_index(drop=True)
-    return final_df
-
 def pad_sequences(tokens: List[torch.Tensor], max_length) -> torch.Tensor:
     """Pad each token sequence to the maximum length in the batch"""
     padded_tokens = [
@@ -67,46 +49,30 @@ class FactualityExample:
 class FactualityDatasetBuilder:
     """Builds a dataset for the Factuality task"""
 
-    def __init__(self, model):
-        self.df = pd.read_csv("tasks/factuality_data/elements_true_false.csv")#load_data("tasks/factuality_data")
+    def __init__(self, model, topic):
+        if topic == "animals":
+            self.df = pd.read_csv("tasks/factuality_data/animals_true_false.csv")
+            self.df["topic"] = "animals"
+        elif topic == "capitals":
+            self.df = pd.read_csv("tasks/factuality_data/capitals_true_false.csv")
+            self.df["topic"] = "capitals"
+        elif topic == "elements":
+            self.df = pd.read_csv("tasks/factuality_data/elements_true_false.csv")
+            self.df["topic"] = "elements"
         self.model = model
         self.system_role = ("You are a judge and your role is to judge whether the provided statement is true or false,"
                             " based on your knowledge. Answer with a 1 if the statement is true"
                             " and 0 if the statement is false."
                             " Here there are a few examples: ")
-        self.examples = [
-            {
-                "statement": "A dog is a type of animal.",
-                "label": 1
-            },
-            {
-                "statement": "A cat is a type of vehicle.",
-                "label": 0
-            },
-            {
-                "statement": "Elephants are the largest land animals.",
-                "label": 1
-            },
-            {
-                "statement": "The sun revolves around the earth.",
-                "label": 0
-            }
-        ]
 
-        self.complex_examples = [
-            {
-                "statement": "Who was the next British Prime Minister after Arthur Balfour?",
-                "label": 0
-            },
-            {
-                "statement": "The band Exile had a 70s No 1 hit with Kiss You All Over.",
-                "label": 1
-            },
-            {
-                "statement": "The common mineral used to make casts, moulds, blackboard chalk and plaster of Paris is calcium carbonate.",
-                "label": 0
-            }
-        ]
+        # Pick 3 random elements from the dataset
+        self.examples = self.df.sample(n=3, random_state=42)
+
+        # Remove the 3 examples from the main dataframe
+        self.df = self.df.drop(self.examples.index).reset_index(drop=True)
+
+        # Convert examples to list of dicts
+        self.examples = self.examples.to_dict(orient="records")
 
         # Pools of elements for corruption
         self.cities = ['Zimbabwe', 'Uganda', 'Argentina', 'North Korea', 'South Africa', 'Congo', 'Algeria', 'United States', 'Russia', 'Tanzania', 'Saudi Arabia', 'Papua New Guinea', 'Pakistan', 'Japan', 'Ukraine', 'Montenegro', 'Germany', 'Brazil', 'Nigeria', 'India', 'Philippines', 'United Arab Emirates', 'Greece', 'Uzbekistan', 'Czechia', 'South Korea', 'Guatemala', 'Macau', 'Djibouti', 'Mexico', 'Switzerland', 'Mauritania', 'Senegal', 'Cayman Islands', 'Malaysia', 'United Kingdom', 'China', 'Jamaica', 'Haiti']
@@ -167,7 +133,7 @@ class FactualityDatasetBuilder:
             example = {
                 "statement": row['statement'],
                 "label": row['label'],
-                "topic": "elements"#row['topic']
+                "topic": row['topic']
             }
             factuality_example = self.build_single_prompt(example)
             clean_tokens.append(factuality_example.clean_tokens)

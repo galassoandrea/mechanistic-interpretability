@@ -12,12 +12,13 @@ class ACDC:
     for finding minimal circuits responsible for specific tasks.
     """
 
-    def __init__(self, model, model_name, task: str = "IOI", target: str = "edge", mode: str = "greedy",
+    def __init__(self, model, model_name, task: str = "IOI", topic: Optional = None, target: str = "edge", mode: str = "greedy",
                  method: str = "pruning", threshold: float = 0.1):
 
         self.model = model
         self.model_name = model_name
         self.task_name = task
+        self.topic = topic
         self.threshold = threshold
         self.device = model.cfg.device
         self.target = target
@@ -45,8 +46,10 @@ class ACDC:
             dataset_builder = Induction.InductionDatasetBuilder(model)
             self.dataset = dataset_builder.build_dataset(num_samples=10)
         elif task == "Factuality":
+            if self.topic is None:
+                raise ValueError("Topic must be specified for Factuality task.")
             print("Building Factuality dataset...")
-            dataset_builder = Factuality.FactualityDatasetBuilder(model)
+            dataset_builder = Factuality.FactualityDatasetBuilder(model, topic=self.topic)
             self.dataset = dataset_builder.build_dataset()
             # Keep only the first 10 examples for faster testing
             self.dataset = self.dataset[:10]
@@ -122,8 +125,11 @@ class ACDC:
             # Iterate through nodes and prune edges
             edges_removed_this_iter = 1
             total_edges_removed = 0
+            iteration = 0
             while edges_removed_this_iter > 0:
                 edges_removed_this_iter = 0
+                iteration += 1
+                print(f"--- Starting iteration {iteration} ---")
                 for receiver in tqdm(ordered_nodes, desc="Evaluating edges"):
                     if receiver.name == "hook_resid_post":
                         senders = self.circuit.get_senders(receiver).copy()
