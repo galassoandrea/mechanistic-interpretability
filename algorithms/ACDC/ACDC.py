@@ -465,14 +465,14 @@ class ACDC:
                     continue
                 if sender.component_type == "attention":
                     sender_act = clean_caches[i][sender.full_activation]
-                    sender_act = sender_act[:, :, sender.head_idx, :]
+                    sender_act = sender_act[:, :, sender.head_idx, :].to(self.device)
                     W_O_h = self.model.blocks[sender.layer - 1].attn.W_O[sender.head_idx]
                     contribution = sender_act @ W_O_h
                     sender_id = f"L{sender.layer}-Head{sender.head_idx}"
                     self.clean_sender_contributions[(sender_id, i)] = contribution.to(self.device)
                     if self.method == "patching":
                         corrupted_sender_act = corrupted_caches[i][sender.full_activation]
-                        corrupted_sender_act = corrupted_sender_act[:, :, sender.head_idx, :]
+                        corrupted_sender_act = corrupted_sender_act[:, :, sender.head_idx, :].to(self.device)
                         corrupted_contribution = corrupted_sender_act @ W_O_h
                         self.corrupted_sender_contributions[(sender_id, i)] = corrupted_contribution.to(self.device)
                 else:
