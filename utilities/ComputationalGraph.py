@@ -191,13 +191,13 @@ def build_computational_graph(model, model_name):
                 nodes_by_layer[layer][act_name] = node
     # Create edges following transformer architecture
     if "pythia" in graph.model_name:
-        graph = create_pythia_edges(graph, nodes_by_layer)
-    elif "gemma" in graph.model_name:
-        graph = create_gemma_edges(graph, nodes_by_layer)
+        graph = create_parallel_edges(graph, nodes_by_layer)
+    else:
+        graph = create_sequential_edges(graph, nodes_by_layer)
     return graph
 
-def create_pythia_edges(graph, nodes_by_layer):
-    """Create edges following pythia model architecture (reuses ACDC logic)."""
+def create_parallel_edges(graph, nodes_by_layer):
+    """Create edges following parallel transformer architecture."""
     max_layer = graph.model.cfg.n_layers
     # Handle embedding to layer 1 connection
     if 0 in nodes_by_layer and 1 in nodes_by_layer:
@@ -247,8 +247,8 @@ def create_pythia_edges(graph, nodes_by_layer):
                         graph.add_edge(edge)
     return graph
 
-def create_gemma_edges(graph, nodes_by_layer):
-    """Create edges following gemma model architecture (reuses ACDC logic)."""
+def create_sequential_edges(graph, nodes_by_layer):
+    """Create edges following sequential transformer architecture."""
     max_layer = graph.model.cfg.n_layers
     if 0 in nodes_by_layer and 1 in nodes_by_layer:
         embed_node = nodes_by_layer[0]["embedding"]

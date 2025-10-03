@@ -132,11 +132,10 @@ def get_final_performance(
     return avg_kl_div
 
 def filter_hooks(cache, model_name, layers):
-    hook_list = []
     all_hooks = []
     if "pythia" in model_name:
         hook_list = ["attn.hook_z", "hook_resid_pre", "hook_resid_post", "hook_mlp_out"]
-    elif "gemma" in model_name:
+    else:
         hook_list = ["attn.hook_z", "hook_resid_pre", "hook_resid_mid", "hook_resid_post", "hook_mlp_out"]
     for hook_name in hook_list:
         hooks = [f"blocks.{l}.{hook_name}" for l in range(layers)]

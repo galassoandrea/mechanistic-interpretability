@@ -95,9 +95,9 @@ class ACDC:
 
         # Run circuit discovery based on the model
         if "pythia" in self.model_name:
-            self.discover_circuit_pythia(ordered_nodes)
-        elif "gemma" in self.model_name:
-            self.discover_circuit_gemma(ordered_nodes)
+            self.discover_circuit_parallel(ordered_nodes)
+        else:
+            self.discover_circuit_sequential(ordered_nodes)
 
         # Clear gpu
         torch.cuda.empty_cache()
@@ -118,7 +118,7 @@ class ACDC:
 
         return self.circuit
 
-    def discover_circuit_pythia(self, ordered_nodes):
+    def discover_circuit_parallel(self, ordered_nodes):
 
         if self.target == "edge":
             print(f"Starting edge evaluation with threshold: {self.threshold}")
@@ -226,7 +226,7 @@ class ACDC:
             print(f"Nodes removed: {total_nodes_removed}")
             print(f"Final circuit nodes: {len(self.circuit.nodes)}")
 
-    def discover_circuit_gemma(self, ordered_nodes):
+    def discover_circuit_sequential(self, ordered_nodes):
         if self.target == "edge":
             print(f"Starting edge evaluation with threshold: {self.threshold}")
             # Iterate through nodes and prune edges
