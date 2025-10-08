@@ -3,19 +3,17 @@ from transformer_lens import HookedTransformer
 from algorithms.ACDC.ACDC import ACDC
 from algorithms.AttributionPatching.AttributionPatching import AttributionPatching
 from utilities.evaluation import evaluate_factuality
-from utilities.GraphVisualizer import visualize_gemma_graph
 from tqdm import tqdm
 from utilities.ComputationalGraph import build_computational_graph
-
-from utilities.visualization import visualize_pythia_graph
+from utilities.visualization import visualize_computational_graph
 
 
 def run_circuit_discovery():
     print("Loading model...")
-    # model_name = "EleutherAI/pythia-70m-deduped"
-    # model_name = "meta-llama/Llama-2-7b-hf
+    model_name = "EleutherAI/pythia-70m-deduped"
+    # model_name = "meta-llama/Llama-2-7b-hf"
     # model_name = "google/gemma-2-2b-it"
-    model_name = "Qwen/Qwen3-0.6B"
+    #model_name = "Qwen/Qwen3-0.6B"
 
     model = HookedTransformer.from_pretrained(
         model_name,
@@ -23,8 +21,9 @@ def run_circuit_discovery():
     )
 
     # ACDC
-    #algorithm = AttributionPatching(model, model_name, task="IOI")
-    algorithm = ACDC(model, model_name, task="Factuality", topic="animals", target="edge", mode="greedy", method="patching", threshold=0.05)
+    #algorithm = AttributionPatching(model, model_name, task="Factuality", topic="animals")
+    #algorithm = ACDC(model, model_name, task="Factuality", topic="animals", target="edge", mode="greedy", method="patching", threshold=0.05)
+    algorithm = ACDC(model, model_name, task="IOI", target="edge", mode="greedy", method="patching", threshold=0.05)
 
     #all_logits = []
     #all_labels = []
@@ -45,13 +44,12 @@ def run_circuit_discovery():
     ## Clean memory
     #del all_logits
     #del all_labels
-#
+
     # Run ACDC on factuality task
     initial_graph = build_computational_graph(model, model_name)
-    visualize_pythia_graph(graph=initial_graph, num_layers=model.cfg.n_layers, num_attention_heads=model.cfg.n_heads, figsize=(20,24))
     circuit = algorithm.discover_circuit()
-    visualize_pythia_graph(graph=circuit, num_layers=model.cfg.n_layers, num_attention_heads=model.cfg.n_heads, figsize=(20,24))
-
+    visualize_computational_graph(initial_graph)
+    visualize_computational_graph(circuit)
 
 
 if __name__ == "__main__":

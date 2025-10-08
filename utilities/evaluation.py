@@ -3,7 +3,8 @@ from typing import Dict, List
 import torch
 import torch.nn.functional as F
 import numpy as np
-from sklearn.metrics import accuracy_score, roc_auc_score, log_loss
+from matplotlib import pyplot as plt
+from sklearn.metrics import accuracy_score, roc_auc_score, log_loss, roc_curve
 
 """Evaluation functions for model outputs."""
 
@@ -115,6 +116,8 @@ def evaluate_factuality(all_logits: List[torch.Tensor], all_labels, model):
     try:
         if len(np.unique(ground_truths)) > 1:
             roc_auc = roc_auc_score(ground_truths, probs_positive)
+            fpr, tpr, _ = roc_curve(ground_truths, probs_positive)
+            plt.plot(fpr, tpr)
         else:
             roc_auc = float('nan')
             print("Warning: Only one class present in labels, cannot compute ROC-AUC")

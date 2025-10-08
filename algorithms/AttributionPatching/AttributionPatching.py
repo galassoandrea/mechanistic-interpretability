@@ -14,7 +14,7 @@ class AttributionPatching:
     Gradient-based approximation for finding important components in circuits.
     """
 
-    def __init__(self, model, model_name, task: str = "IOI", target: str = "edge",
+    def __init__(self, model, model_name, task: str = "IOI", topic: Optional = None, target: str = "edge",
                  threshold: float = 0.05):
 
         self.model = model
@@ -48,11 +48,14 @@ class AttributionPatching:
             dataset_builder = Induction.InductionDatasetBuilder(model)
             self.dataset = dataset_builder.build_dataset(num_samples=10)
         elif task == "Factuality":
+            if topic is None:
+                raise ValueError("Topic must be specified for Factuality task.")
             print("Building Factuality dataset...")
-            dataset_builder = Factuality.FactualityDatasetBuilder(model)
+            dataset_builder = Factuality.FactualityDatasetBuilder(model, topic=topic)
             self.dataset = dataset_builder.build_dataset()
-            self.dataset = self.dataset[:10]
             self.metric = factuality_nll_metric
+            # Keep only the first 10 examples for faster testing
+            self.dataset = self.dataset[:10]
 
 
     def discover_circuit(self, threshold_percentile=10):

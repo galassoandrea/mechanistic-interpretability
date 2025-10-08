@@ -1,189 +1,13 @@
 from collections import defaultdict
 from typing import List
-
 import seaborn as sns
 import numpy as np
 import matplotlib.pyplot as plt
 import networkx as nx
 import matplotlib.patches as mpatches
-
-def plot_activation_importance(num_layers, num_positions, patching_results):
-    """Plots the activation importance heatmap based on patching results."""
-    importance_matrix = np.zeros((num_layers, num_positions))
-    for key, scores in patching_results.items():
-        layer = int(key.split("_")[0][1:])
-        position = int(key.split("pos")[-1])
-        importance_matrix[layer, position] = np.mean(scores)
-    plt.figure(figsize=(10, 6))
-    plt.imshow(importance_matrix, cmap="viridis", aspect="auto")
-    plt.colorbar(label="Normalized Score")
-    plt.xlabel("Position")
-    plt.ylabel("Layer")
-    plt.title(f"Activation Importance")
-    plt.show()
-
-
-def plot_circuit_graph(circuit_nodes, iteration=None):
-    """Visualize the circuit as a directed graph with edges inferred from transformer block order."""
-    G = nx.DiGraph()
-
-    # Define a predefined order of activation types for consistent layout
-    activation_types_order = [
-        "resid_pre", "hook_q", "hook_k", "v", "z",
-        "resid_mid", "mlp_out", "resid_post"
-    ]
-
-    # Parse nodes into structured form
-    parsed_nodes = []
-    for node in circuit_nodes:
-        parts = node.split("_")
-        layer = int(parts[0][1:])
-        act_type = "_".join(parts[1:-1])
-        position = int(parts[-1].replace("pos", "")) if "pos" in parts[-1] else int(parts[-1])
-        parsed_nodes.append((node, layer, act_type, position))
-        G.add_node(node)
-
-    # Build edges based on transformer forward pass order
-    layer_groups = defaultdict(list)
-    for node, layer, act_type, position in parsed_nodes:
-        layer_groups[layer].append((node, act_type, position))
-
-    for layer in sorted(layer_groups.keys()):
-        # Sort activations in each layer according to activation_types_order
-        layer_groups[layer].sort(key=lambda x: activation_types_order.index(x[1]))
-        # Connect nodes in order inside the layer
-        for i in range(len(layer_groups[layer]) - 1):
-            G.add_edge(layer_groups[layer][i][0], layer_groups[layer][i+1][0])
-        # Connect final activation in layer to first activation in next layer
-        if layer + 1 in layer_groups:
-            G.add_edge(layer_groups[layer][-1][0], layer_groups[layer+1][0][0])
-
-    # Node positioning: parallel lines for different activation types
-    pos = {}
-    type_offset_map = {act: i for i, act in enumerate(activation_types_order)}
-    for node, layer, act_type, position in parsed_nodes:
-        y_coord = -layer - type_offset_map[act_type] * 0.15  # offset by type to avoid overlap
-        pos[node] = (position, y_coord)
-
-    # Color mapping for activation types
-    color_map = plt.cm.get_cmap("tab10", len(activation_types_order))
-    node_colors = [
-        color_map(activation_types_order.index(act_type)) for _, _, act_type, _ in parsed_nodes
-    ]
-
-    # Draw graph
-    plt.figure(figsize=(12, 8))
-    nx.draw_networkx_nodes(G, pos, node_color=node_colors, node_size=600)
-    nx.draw_networkx_edges(G, pos, arrowstyle="->", arrowsize=15, edge_color="gray", width=1.2)
-    nx.draw_networkx_labels(G, pos, font_size=8)
-
-    # Legend for activation types
-    for idx, act_type in enumerate(activation_types_order):
-        plt.scatter([], [], color=color_map(idx), label=act_type)
-    plt.legend(title="Activation Types", loc="upper left", bbox_to_anchor=(1, 1))
-
-    plt.axis("off")
-    title = "Circuit Graph"
-    if iteration is not None:
-        title += f" (Iteration {iteration})"
-    plt.title(title)
-    plt.tight_layout()
-    plt.show()
-
-def visualize_head_importance(model, dataset, heads: List):
-    """Create visualization of head importance scores"""
-    # Prepare tasks for heatmap
-    ablation_matrix = np.zeros((model.cfg.n_layers, model.cfg.n_heads))
-    for head in heads:
-        layer, head, importance = head.layer, head.head, head.importance_score
-        ablation_matrix[layer, head] = importance
-    # Create subplots
-    fig, ax = plt.subplots(figsize=(15, 6))
-    # Head ablation heatmap
-    sns.heatmap(ablation_matrix, annot=True, fmt='.3f', cmap='RdYlBu_r',
-                ax=ax, xticklabels=range(model.cfg.n_heads),
-                yticklabels=range(model.cfg.n_layers))
-    ax.set_title('Head Ablation Importance Scores')
-    ax.set_xlabel('Head')
-    ax.set_ylabel('Layer')
-    plt.tight_layout()
-    plt.show()
-    # Top heads bar plot
-    head_names = [f"L{head.layer}_H{head.head}" for head in heads]
-    head_scores = [head.importance_score for head in heads]
-    fig, ax = plt.subplots(figsize=(12, 6))
-    x = np.arange(len(head_names))
-    width = 0.35
-    ax.bar(x - width / 2, head_scores, width, label='Head Ablation', alpha=0.8)
-    ax.set_xlabel('Attention Heads')
-    ax.set_ylabel('Importance Score')
-    ax.set_title('Top 10 Most Important Attention Heads')
-    ax.set_xticks(x)
-    ax.set_xticklabels(head_names, rotation=45)
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.show()
-
-
-def visualize_circuit_graph(model, heads: List):
-    """Visualize the discovered circuit as a network graph"""
-    G = nx.DiGraph()
-    # Add nodes for each layer
-    for layer in range(model.cfg.n_layers):
-        G.add_node(f"Layer_{layer}", layer=layer, node_type="layer")
-    # Add circuit heads as nodes
-    circuit_heads = [f"L{head.layer}_H{head.head}" for head in heads]
-    head_importance = {f"L{head.layer}_H{head.head}": head.importance_score for head in heads}
-    for head_name in circuit_heads:
-        layer = int(head_name[1])
-        head_idx = int(head_name[4])
-        importance = head_importance[head_name]
-        G.add_node(head_name,
-                   layer=layer,
-                   head=head_idx,
-                   importance=importance,
-                   node_type="head")
-        # Add edge from layer to head
-        G.add_edge(f"Layer_{layer}", head_name)
-        # Add edges between layers (information flow)
-        if layer < model.cfg.n_layers - 1:
-            G.add_edge(head_name, f"Layer_{layer + 1}")
-    # Create layout
-    pos = {}
-    layer_width = max(len([n for n in G.nodes() if G.nodes[n].get('layer') == layer])
-                      for layer in range(model.cfg.n_layers))
-    for node in G.nodes():
-        if G.nodes[node]['node_type'] == 'layer':
-            layer = G.nodes[node]['layer']
-            pos[node] = (layer * 2, 0)
-        else:  # head
-            layer = G.nodes[node]['layer']
-            head_idx = G.nodes[node]['head']
-            pos[node] = (layer * 2, (head_idx - model.cfg.n_heads / 2) * 0.5)
-    # Plot
-    plt.figure(figsize=(15, 10))
-    # Draw layer nodes
-    layer_nodes = [n for n in G.nodes() if G.nodes[n]['node_type'] == 'layer']
-    nx.draw_networkx_nodes(G, pos, nodelist=layer_nodes,
-                           node_color='lightblue', node_size=800,
-                           node_shape='s', alpha=0.7)
-    # Draw head nodes with size proportional to importance
-    head_nodes = [n for n in G.nodes() if G.nodes[n]['node_type'] == 'head']
-    head_sizes = [max(200, G.nodes[n]['importance'] * 5000) for n in head_nodes]
-    head_colors = [G.nodes[n]['importance'] for n in head_nodes]
-    nx.draw_networkx_nodes(G, pos, nodelist=head_nodes,
-                           node_color=head_colors, node_size=head_sizes,
-                           cmap='Reds', alpha=0.8)
-    # Draw edges
-    nx.draw_networkx_edges(G, pos, alpha=0.5, arrows=True, arrowsize=20)
-    # Add labels
-    nx.draw_networkx_labels(G, pos, font_size=8)
-    plt.title('IOI Circuit Graph\n(Node size proportional to importance)', size=16)
-    plt.axis('off')
-    plt.tight_layout()
-    plt.show()
-
+import plotly.graph_objects as go
+from typing import Dict, Set, Tuple, List
+from collections import defaultdict
 
 def create_pythia_graph(graph, num_layers, num_attention_heads):
     """Create a NetworkX graph representing the Pythia-70m computational graph."""
@@ -360,3 +184,319 @@ def visualize_pythia_graph(graph, num_layers, num_attention_heads,
     plt.show()
 
     return G, pos, node_colors, node_types
+
+def visualize_computational_graph(
+        graph,
+        title: str = "Circuit Discovery: Computational Graph",
+        width: int = 2000,
+        height: int = 1400,
+        show_edge_labels: bool = False
+):
+    """ Visualize a computational graph using Plotly to get an interactive visualization. """
+
+    # Define color scheme for different component types
+    color_map = {
+        'embedding': '#FF6B6B',  # Red
+        'residual_pre': '#4ECDC4',  # Teal
+        'residual_mid': '#45B7D1',  # Light Blue
+        'residual_post': '#96CEB4',  # Green
+        'attention': '#FFEAA7',  # Yellow
+        'mlp': '#DDA0DD'  # Plum
+    }
+
+    # Get number of layers and heads from the model configuration
+    n_layers = graph.model.cfg.n_layers
+    layers = list(range(n_layers + 1))
+    n_heads = graph.model.cfg.n_heads
+
+    # Calculate positions for nodes
+    node_positions = {}
+
+    # Define vertical ordering of component types within each layer
+    component_order = {
+        'embedding': 0,
+        'residual_pre': 1,
+        'attention': 2,
+        'residual_mid': 3,
+        'mlp': 4,
+        'residual_post': 5
+    }
+
+    # Assign positions
+    for node in graph.nodes:
+        layer_idx = layers.index(node.layer)
+        x_pos = layer_idx * 2  # Horizontal spacing between layers
+
+        # Vertical position based on component type
+        if node.component_type == 'residual':
+            if 'pre' in node.name:
+                base_y = component_order['residual_pre'] * 3
+            elif 'mid' in node.name:
+                base_y = component_order['residual_mid'] * 3
+            else:
+                base_y = component_order['residual_post'] * 3
+        else:
+            base_y = component_order.get(node.component_type, 3) * 3
+
+        # For attention heads, spread them horizontally within their slot
+        if node.component_type == 'attention' and node.head_idx is not None:
+            # Offset x position for each head
+            head_offset = (node.head_idx - (n_heads - 1) / 2) * 0.15
+            x_pos += head_offset
+
+        node_positions[node] = (x_pos, base_y)
+
+    # Prepare edge traces
+    edge_x = []
+    edge_y = []
+    edge_hover_text = []
+
+    for edge in graph.edges:
+        x0, y0 = node_positions[edge.sender]
+        x1, y1 = node_positions[edge.receiver]
+
+        edge_x.extend([x0, x1, None])
+        edge_y.extend([y0, y1, None])
+        edge_hover_text.append(f"{edge.sender.name} → {edge.receiver.name}")
+
+    # Create edge trace
+    edge_trace = go.Scatter(
+        x=edge_x,
+        y=edge_y,
+        mode='lines',
+        line=dict(width=0.8, color='#888'),
+        hoverinfo='skip',
+        showlegend=False,
+        opacity=0.5
+    )
+
+    # Prepare node traces (one per component type for legend)
+    node_traces = {}
+
+    for comp_type in component_order.keys():
+        node_traces[comp_type] = {
+            'x': [],
+            'y': [],
+            'text': [],
+            'hover_text': [],
+            'marker_size': []
+        }
+
+    for node in graph.nodes:
+        x, y = node_positions[node]
+        if node.component_type == 'residual':
+            if 'pre' in node.name:
+                comp_type = 'residual_pre'
+            elif 'mid' in node.name:
+                comp_type = 'residual_mid'
+            else:
+                comp_type = 'residual_post'
+        else:
+            comp_type = node.component_type
+
+        node_traces[comp_type]['x'].append(x)
+        node_traces[comp_type]['y'].append(y)
+        node_traces[comp_type]['text'].append(node.name)
+
+        # Create hover text
+        in_degree = len(graph.reverse_adjacency[node]) if node in graph.reverse_adjacency else 0
+        out_degree = len(graph.adjacency[node]) if node in graph.adjacency else 0
+        hover_text = (
+            f"<b>{node.name}</b><br>"
+            f"Type: {node.component_type}<br>"
+            f"Layer: {node.layer}<br>"
+            f"In-degree: {in_degree}<br>"
+            f"Out-degree: {out_degree}"
+        )
+        if node.head_idx is not None:
+            hover_text += f"<br>Head: {node.head_idx}"
+
+        node_traces[comp_type]['hover_text'].append(hover_text)
+
+        # Size based on connectivity
+        size = 10 + (in_degree + out_degree) * 2
+        node_traces[comp_type]['marker_size'].append(min(size, 30))
+
+    # Create figure
+    fig = go.Figure()
+
+    # Add edge trace
+    fig.add_trace(edge_trace)
+
+    # Add node traces
+    for comp_type, trace_data in node_traces.items():
+        if len(trace_data['x']) > 0:  # Only add if there are nodes of this type
+            fig.add_trace(go.Scatter(
+                x=trace_data['x'],
+                y=trace_data['y'],
+                mode='markers+text',
+                name=comp_type.replace('_', ' ').title(),
+                text=trace_data['text'],
+                hovertext=trace_data['hover_text'],
+                hoverinfo='text',
+                textposition="middle center",
+                textfont=dict(size=8, color='black'),
+                marker=dict(
+                    size=trace_data['marker_size'],
+                    color=color_map.get(comp_type, '#95a5a6'),
+                    line=dict(width=2, color='white'),
+                    symbol='circle'
+                )
+            ))
+
+    # Update layout
+    fig.update_layout(
+        title=dict(
+            text=f"{title}<br><sub>Model: {graph.model_name} | "
+                 f"Nodes: {len(graph.nodes)} | Edges: {len(graph.edges)}</sub>",
+            x=0.5,
+            xanchor='center'
+        ),
+        showlegend=True,
+        legend=dict(
+            yanchor="top",
+            y=0.99,
+            xanchor="right",
+            x=0.99,
+            bgcolor="rgba(255, 255, 255, 0.8)",
+            bordercolor="Black",
+            borderwidth=1
+        ),
+        width=width,
+        height=height,
+        hovermode='closest',
+        plot_bgcolor='#f8f9fa',
+        xaxis=dict(
+            showgrid=False,
+            zeroline=False,
+            showticklabels=True,
+            title="Layer",
+            tickmode='array',
+            tickvals=list(range(0, n_layers * 2, 2)),
+            ticktext=[f"L{i}" for i in layers]
+        ),
+        yaxis=dict(
+            showgrid=False,
+            zeroline=False,
+            showticklabels=False,
+            title=""
+        ),
+        margin=dict(l=20, r=20, t=100, b=40)
+    )
+
+    # Add annotations for component types
+    for comp_type, order_idx in component_order.items():
+        if any(n.component_type == comp_type for n in graph.nodes):
+            fig.add_annotation(
+                x=-0.5,
+                y=order_idx * 3,
+                text=comp_type.replace('_', ' ').title(),
+                showarrow=False,
+                xanchor='right',
+                font=dict(size=10, color=color_map.get(comp_type, '#95a5a6')),
+                bgcolor='white',
+                bordercolor=color_map.get(comp_type, '#95a5a6'),
+                borderwidth=1,
+                borderpad=4
+            )
+    fig.show()
+    fig.write_html("computational_graph.html")
+
+def visualize_computational_graph_hierarchical(
+        graph,
+        title: str = "Circuit Discovery: Hierarchical View",
+        width: int = 1600,
+        height: int = 1200
+):
+    """ Alternative visualization function to get a more hierarchical, top-down visualization."""
+    # Use Plotly's built-in tree layout approximation
+    color_map = {
+        'embedding': '#FF6B6B',
+        'residual': '#4ECDC4',
+        'residual_mid': '#45B7D1',
+        'residual_post': '#96CEB4',
+        'attention': '#FFEAA7',
+        'mlp': '#DDA0DD'
+    }
+    # Build position using layer-based vertical layout
+    n_layers = graph.model.cfg.n_layers
+    layers = list(range(n_layers + 1))
+    node_positions = {}
+    # Group nodes by layer and type
+    layer_groups = defaultdict(lambda: defaultdict(list))
+    for node in graph.nodes:
+        layer_groups[node.layer][node.component_type].append(node)
+    # Assign positions
+    for layer_idx, layer in enumerate(layers):
+        y_base = -layer_idx * 4  # Vertical spacing
+        groups = layer_groups[layer]
+        all_nodes_in_layer = []
+        for comp_type in ['embedding', 'residual', 'attention' 'mlp']:
+            if comp_type == 'residual':
+                for sub_type in ['residual_pre', 'residual_mid', 'residual_post']:
+                    all_nodes_in_layer.extend(groups[sub_type])
+            else:
+                all_nodes_in_layer.extend(groups[comp_type])
+        n_nodes = len(all_nodes_in_layer)
+        for i, node in enumerate(all_nodes_in_layer):
+            x_pos = (i - (n_nodes - 1) / 2) * 1.5
+            node_positions[node] = (x_pos, y_base)
+    # Create visualization similar to first function but with vertical layout
+    edge_x, edge_y = [], []
+    for edge in graph.edges:
+        x0, y0 = node_positions[edge.sender]
+        x1, y1 = node_positions[edge.receiver]
+        edge_x.extend([x0, x1, None])
+        edge_y.extend([y0, y1, None])
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=edge_x, y=edge_y,
+        mode='lines',
+        line=dict(width=1, color='#888'),
+        hoverinfo='skip',
+        showlegend=False,
+        opacity=0.4
+    ))
+    # Add nodes
+    for comp_type in color_map.keys():
+        if comp_type in ['residual_pre', 'residual_mid', 'residual_post']:
+            nodes_of_type = [n for n in graph.nodes if n.component_type == 'residual' and comp_type.split('_')[1] in n.name]
+        else:
+            nodes_of_type = [n for n in graph.nodes if n.component_type == comp_type]
+        if not nodes_of_type:
+            continue
+        xs = [node_positions[n][0] for n in nodes_of_type]
+        ys = [node_positions[n][1] for n in nodes_of_type]
+        texts = [n.name for n in nodes_of_type]
+        hovers = []
+        for n in nodes_of_type:
+            in_deg = len(graph.reverse_adjacency[n])
+            out_deg = len(graph.adjacency[n])
+            hover = f"<b>{n.name}</b><br>Layer: {n.layer}<br>In: {in_deg} | Out: {out_deg}"
+            hovers.append(hover)
+        fig.add_trace(go.Scatter(
+            x=xs, y=ys,
+            mode='markers+text',
+            name=comp_type.replace('_', ' ').title(),
+            text=texts,
+            hovertext=hovers,
+            hoverinfo='text',
+            textposition="middle center",
+            textfont=dict(size=8),
+            marker=dict(
+                size=15,
+                color=color_map[comp_type],
+                line=dict(width=2, color='white')
+            )
+        ))
+    fig.update_layout(
+        title=f"{title}<br><sub>{graph.model_name}</sub>",
+        showlegend=True,
+        width=width,
+        height=height,
+        hovermode='closest',
+        plot_bgcolor='#f8f9fa',
+        xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False)
+    )
+    return fig
