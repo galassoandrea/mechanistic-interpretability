@@ -167,7 +167,9 @@ class ACDC:
                                 self.circuit.remove_edge(edge)
                                 edges_removed_this_iter += 1
                                 self.ablated_edges.append(edge)
-                                ordered_nodes.remove(edge.sender)
+                                # Only remove sender from ordered_nodes if it has no more receivers
+                                if len(self.circuit.get_receivers(edge.sender)) == 0:
+                                    ordered_nodes.remove(edge.sender)
                                 print(f"Edge removed.")
                 total_edges_removed += edges_removed_this_iter
                 print(f"Edges removed this iteration: {edges_removed_this_iter}")
@@ -272,6 +274,9 @@ class ACDC:
                                 self.circuit.remove_edge(edge)
                                 total_edges_removed += 1
                                 self.ablated_edges.append(edge)
+                                # Only remove sender from ordered_nodes if it has no more receivers
+                                if len(self.circuit.get_receivers(edge.sender)) == 0:
+                                    ordered_nodes.remove(edge.sender)
                                 print(f"Edge removed.")
                     elif receiver.name == "hook_resid_mid":
                         senders = self.full_graph.get_senders(receiver)
@@ -309,7 +314,9 @@ class ACDC:
                                 self.circuit.remove_edge(edge)
                                 edges_removed_this_iter += 1
                                 self.ablated_edges.append(edge)
-                                ordered_nodes.remove(edge.sender)
+                                # Only remove sender from ordered_nodes if it has no more receivers
+                                if len(self.circuit.get_receivers(edge.sender)) == 0:
+                                    ordered_nodes.remove(edge.sender)
                                 print(f"Edge removed.")
                 total_edges_removed += edges_removed_this_iter
                 print(f"Edges removed this iteration: {edges_removed_this_iter}")
