@@ -115,6 +115,8 @@ class ACDC:
         )
         print(f"Final KL divergence: {kl_score:.6f}")
 
+        save_circuit(self.model_name, self.topic, self.target, self.ablated_nodes, self.ablated_edges)
+
         return self.circuit
 
     def discover_circuit_parallel(self, ordered_nodes):
@@ -178,22 +180,6 @@ class ACDC:
             print(f"Edges removed: {total_edges_removed}")
             print(f"Final circuit edges: {len(self.circuit.edges)}")
 
-            # Store removed edges metadata in a json file
-            params_to_save = {
-                "ablated_edges": [
-                    {"sender": get_node_id(edge.sender), "receiver": edge.receiver.full_activation}
-                    for edge in self.ablated_edges
-                ]
-            }
-            SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-            save_dir = os.path.join(SCRIPT_DIR, "removed_edges")
-            os.makedirs(save_dir, exist_ok=True)
-
-            # Build full file path
-            save_path = os.path.join(save_dir, f"{self.model_name.replace('/', '-')}-{self.topic}.json")
-            with open(save_path, "w") as f:
-                json.dump(params_to_save, f, indent=2)
-
         elif self.target == "node":
             print(f"Starting node evaluation with threshold: {self.threshold}")
             # Iterate through nodes and ablate them
@@ -214,7 +200,6 @@ class ACDC:
                                     inputs=clean_tokens,
                                     i=i,
                                     node_to_patch=node,
-                                    clean_sender_contributions=self.clean_sender_contributions,
                                     corrupted_sender_contributions=self.corrupted_sender_contributions,
                                     ablated_nodes=self.ablated_nodes
                                 )
@@ -361,7 +346,6 @@ class ACDC:
                                     inputs=clean_tokens,
                                     i=i,
                                     node_to_patch=node,
-                                    clean_sender_contributions=self.clean_sender_contributions,
                                     corrupted_sender_contributions=self.corrupted_sender_contributions,
                                     ablated_nodes=self.ablated_nodes
                                 )
@@ -439,7 +423,6 @@ class ACDC:
             inputs: torch.Tensor,
             i,
             node_to_patch: Node,
-            clean_sender_contributions: Optional = None,
             corrupted_sender_contributions: Optional = None,
             ablated_nodes: Optional[List[Node]] = None
     ) -> torch.Tensor:
@@ -451,21 +434,19 @@ class ACDC:
         # In case of greedy evaluation, check if there are nodes previously ablated and, if so, re-add the hooks for them
         if ablated_nodes and self.mode == "greedy":
             for node in ablated_nodes:
-                sender_id = get_node_id(node)
                 hook = create_node_patching_hook(
                     method="pruning",
-                    node=node_to_patch
+                    node=node
                 )
                 if hasattr(self.model, 'add_hook'):
                     self.model.add_hook(node.full_activation, hook)
 
         # Create ablation hook
-        sender_id = get_node_id(node_to_patch)
+        node_id = get_node_id(node_to_patch)
         patching_hook = create_node_patching_hook(
                     self.method,
                     node_to_patch,
-                    clean_sender_contributions[(sender_id, i)] if clean_sender_contributions else None,
-                    corrupted_sender_contributions[(sender_id, i)] if corrupted_sender_contributions else None
+                    corrupted_sender_contributions[(node_id, i)] if corrupted_sender_contributions else None
                 )
 
         # Register hook on the node
@@ -492,21 +473,21 @@ class ACDC:
                     if self.target == "edge":
                         W_O_h = self.model.blocks[node.layer - 1].attn.W_O[node.head_idx]
                         clean_contribution = clean_contribution @ W_O_h
-                    sender_id = f"L{node.layer}-Head{node.head_idx}"
-                    self.clean_sender_contributions[(sender_id, i)] = clean_contribution.to(self.device)
+                    node_id = f"L{node.layer}-Head{node.head_idx}"
+                    self.clean_sender_contributions[(node_id, i)] = clean_contribution.to(self.device)
                     if self.method == "patching":
                         corrupted_sender_act = corrupted_caches[i][node.full_activation]
                         corrupted_contribution = corrupted_sender_act[:, :, node.head_idx, :].to(self.device)
                         if self.target == "edge":
                             W_O_h = self.model.blocks[node.layer - 1].attn.W_O[node.head_idx]
                             corrupted_contribution = corrupted_contribution @ W_O_h
-                        self.corrupted_sender_contributions[(sender_id, i)] = corrupted_contribution.to(self.device)
+                        self.corrupted_sender_contributions[(node_id, i)] = corrupted_contribution.to(self.device)
                 else:
-                    sender_id = f"L{node.layer}-{node.name.split('_', 1)[1]}"
+                    node_id = f"L{node.layer}-{node.name.split('_', 1)[1]}"
                     contribution = clean_caches[i][node.full_activation]
-                    self.clean_sender_contributions[(sender_id, i)] = contribution.to(self.device)
+                    self.clean_sender_contributions[(node_id, i)] = contribution.to(self.device)
                     if self.method == "patching":
                         corrupted_contribution = corrupted_caches[i][node.full_activation]
-                        self.corrupted_sender_contributions[(sender_id, i)] = corrupted_contribution.to(self.device)
+                        self.corrupted_sender_contributions[(node_id, i)] = corrupted_contribution.to(self.device)
 
 

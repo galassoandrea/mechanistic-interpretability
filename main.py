@@ -1,7 +1,7 @@
 import torch
 from transformer_lens import HookedTransformer
 from algorithms.ACDC.ACDC import ACDC
-from algorithms.ACDC.utils import load_pruned_model
+from algorithms.ACDC.utils import add_circuit_hooks
 from algorithms.AttributionPatching.AttributionPatching import AttributionPatching
 from utilities.evaluation import evaluate_factuality
 from tqdm import tqdm
@@ -23,32 +23,32 @@ def run_circuit_discovery():
 
     # ACDC
     #algorithm = AttributionPatching(model, model_name, task="Factuality", topic="animals")
-    algorithm = ACDC(model, model_name, task="Factuality", topic="animals", target="edge", mode="greedy", method="patching", threshold=0.05)
+    algorithm = ACDC(model, model_name, task="Factuality", topic="animals", target="node", mode="greedy", method="patching", threshold=0.05)
     #algorithm = ACDC(model, model_name, task="IOI", target="edge", mode="greedy", method="patching", threshold=0.05)
 
-    #all_logits = []
-    #all_labels = []
-#
-    #for example in tqdm(algorithm.dataset, desc="Evaluating examples"):
-    #    prompt_tokens = torch.tensor(example.clean_tokens).unsqueeze(0).to(model.cfg.device)
-    #    with torch.no_grad():
-    #        output = model(prompt_tokens)
-    #        if hasattr(output, 'logits'):
-    #            logit = output.logits
-    #        else:
-    #            logit = output
-    #    all_logits.append(logit.cpu())
-    #    all_labels.append(example.label)
-#
-    #evaluate_factuality(all_logits, all_labels, model)
-#
-    ## Clean memory
-    #del all_logits
-    #del all_labels
+    all_logits = []
+    all_labels = []
+
+    for example in tqdm(algorithm.dataset, desc="Evaluating examples"):
+        prompt_tokens = torch.tensor(example.clean_tokens).unsqueeze(0).to(model.cfg.device)
+        with torch.no_grad():
+            output = model(prompt_tokens)
+            if hasattr(output, 'logits'):
+                logit = output.logits
+            else:
+                logit = output
+        all_logits.append(logit.cpu())
+        all_labels.append(example.label)
+
+    evaluate_factuality(all_logits, all_labels, model)
+
+    # Clean memory
+    del all_logits
+    del all_labels
 
     # Run ACDC on factuality task
-    initial_graph = build_computational_graph(model, model_name)
-    circuit = algorithm.discover_circuit()
+    #initial_graph = build_computational_graph(model, model_name)
+    #circuit = algorithm.discover_circuit()
     #visualize_computational_graph(initial_graph)
     #visualize_computational_graph(circuit)
 
