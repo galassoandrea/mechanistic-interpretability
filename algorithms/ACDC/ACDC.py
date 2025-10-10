@@ -1,4 +1,5 @@
-from collections import defaultdict
+import json
+import os
 from algorithms.ACDC.utils import *
 from utilities.evaluation import kl_divergence
 import numpy as np
@@ -84,9 +85,9 @@ class ACDC:
                     _, c_corr = self.model.run_with_cache(corrupted_inputs, return_type="logits")
                     c_corr = filter_hooks(c_corr, self.model_name, self.model.cfg.n_layers)
                     corrupted_caches.append(c_corr)
-
-        # Precompute sender contributions for all examples
-        self.precompute_sender_contributions(clean_caches, corrupted_caches)
+                    
+        # Precompute node contributions for all examples
+        self.precompute_node_contributions(clean_caches, corrupted_caches)
         # Clear memory from caches since we don't need them anymore
         del clean_caches
         del corrupted_caches
@@ -105,12 +106,10 @@ class ACDC:
         # Compute final KL divergence (add all hooks at the same time)
         kl_score = get_final_performance(
             model=self.model,
-            method=self.method,
             dataset=self.dataset,
             task_name=self.task_name,
             clean_logits=self.clean_logits,
             clean_sender_contributions=self.clean_sender_contributions,
-            corrupted_sender_contributions=self.corrupted_sender_contributions,
             ablated_nodes=self.ablated_nodes,
             ablated_edges=self.ablated_edges
         )
@@ -134,7 +133,7 @@ class ACDC:
                     if receiver.name == "hook_resid_post":
                         senders = self.circuit.get_senders(receiver).copy()
                         for sender in senders:
-                            sender_id = get_sender_id(sender)
+                            sender_id = get_node_id(sender)
                             print(f"Evaluating edge: {sender_id} -> L{receiver.layer}-{receiver.name.split('_', 1)[1]}")
                             edge = Edge(sender, receiver)
                             # Temporarily remove the edge
@@ -179,6 +178,22 @@ class ACDC:
             print(f"Edges removed: {total_edges_removed}")
             print(f"Final circuit edges: {len(self.circuit.edges)}")
 
+            # Store removed edges metadata in a json file
+            params_to_save = {
+                "ablated_edges": [
+                    {"sender": get_node_id(edge.sender), "receiver": edge.receiver.full_activation}
+                    for edge in self.ablated_edges
+                ]
+            }
+            SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+            save_dir = os.path.join(SCRIPT_DIR, "removed_edges")
+            os.makedirs(save_dir, exist_ok=True)
+
+            # Build full file path
+            save_path = os.path.join(save_dir, f"{self.model_name.replace('/', '-')}-{self.topic}.json")
+            with open(save_path, "w") as f:
+                json.dump(params_to_save, f, indent=2)
+
         elif self.target == "node":
             print(f"Starting node evaluation with threshold: {self.threshold}")
             # Iterate through nodes and ablate them
@@ -188,18 +203,18 @@ class ACDC:
                 nodes_removed_this_iter = 0
                 for node in tqdm(ordered_nodes, desc="Evaluating nodes"):
                     if node.name in ['hook_resid_pre', 'hook_resid_post', 'hook_mlp_out', 'hook_z']:
-                        sender_id = get_sender_id(node)
-                        print(f"Evaluating node: {sender_id}")
+                        node_id = get_node_id(node)
+                        print(f"Evaluating node: {node_id}")
                         # Temporarily remove the node
                         kl_divs = []
                         for i, example in enumerate(self.dataset):
                             clean_tokens = example.clean_tokens
-                            # Ablate the edge by zeroing out the sender's contribution (not the whole activation) only on receiver
                             if self.method == "patching":
                                 patched_logits = self.run_with_node_patching(
                                     inputs=clean_tokens,
                                     i=i,
                                     node_to_patch=node,
+                                    clean_sender_contributions=self.clean_sender_contributions,
                                     corrupted_sender_contributions=self.corrupted_sender_contributions,
                                     ablated_nodes=self.ablated_nodes
                                 )
@@ -240,7 +255,7 @@ class ACDC:
                     if receiver.name == "hook_resid_post":
                         senders = self.circuit.get_senders(receiver).copy()
                         for sender in senders:
-                            sender_id = get_sender_id(sender)
+                            sender_id = get_node_id(sender)
                             print(
                                 f"Evaluating edge: {sender_id} -> L{receiver.layer}-{receiver.name.split('_', 1)[1]}")
                             edge = Edge(sender, receiver)
@@ -279,9 +294,9 @@ class ACDC:
                                     ordered_nodes.remove(edge.sender)
                                 print(f"Edge removed.")
                     elif receiver.name == "hook_resid_mid":
-                        senders = self.full_graph.get_senders(receiver)
+                        senders = self.circuit.get_senders(receiver).copy()
                         for sender in senders:
-                            sender_id = get_sender_id(sender)
+                            sender_id = get_node_id(sender)
                             print(f"Evaluating edge: {sender_id} -> L{receiver.layer}-{receiver.name.split('_', 1)[1]}")
                             edge = Edge(sender, receiver)
                             # Temporarily remove the edge
@@ -335,18 +350,18 @@ class ACDC:
                 nodes_removed_this_iter = 0
                 for node in tqdm(ordered_nodes, desc="Evaluating nodes"):
                     if node.name in ['hook_resid_pre', 'hook_resid_mid', 'hook_resid_post', 'hook_mlp_out', 'hook_z']:
-                        sender_id = get_sender_id(node)
-                        print(f"Evaluating node: {sender_id}")
+                        node_id = get_node_id(node)
+                        print(f"Evaluating node: {node_id}")
                         # Temporarily remove the node
                         kl_divs = []
                         for i, example in enumerate(self.dataset):
                             clean_tokens = example.clean_tokens
-                            # Ablate the edge by zeroing out the sender's contribution (not the whole activation) only on receiver
                             if self.method == "patching":
                                 patched_logits = self.run_with_node_patching(
                                     inputs=clean_tokens,
                                     i=i,
                                     node_to_patch=node,
+                                    clean_sender_contributions=self.clean_sender_contributions,
                                     corrupted_sender_contributions=self.corrupted_sender_contributions,
                                     ablated_nodes=self.ablated_nodes
                                 )
@@ -389,20 +404,20 @@ class ACDC:
         # Clear previous hooks
         self.model.reset_hooks()
 
-        # In case of greedy evaluation, check if there are edges previously ablated and, if so, re-add the hooks for them
+        # In case of greedy evaluation, check if there are edges previously pruned and, if so, re-add the hooks for them
         if ablated_edges and self.mode == "greedy":
             for edge in ablated_edges:
-                sender_id = get_sender_id(edge.sender)
+                sender_id = get_node_id(edge.sender)
                 hook = create_edge_patching_hook(
-                    self.method,
-                    clean_sender_contributions[(sender_id,i)],
-                    corrupted_sender_contributions[(sender_id,i)] if corrupted_sender_contributions else None
+                    method="pruning",
+                    clean_sender_contribution=clean_sender_contributions[(sender_id,i)],
+                    corrupted_sender_contribution=corrupted_sender_contributions[(sender_id,i)] if corrupted_sender_contributions else None
                 )
                 if hasattr(self.model, 'add_hook'):
                     self.model.add_hook(edge.receiver.full_activation, hook)
 
         # Create ablation hook
-        sender_id = get_sender_id(edge_to_patch.sender)
+        sender_id = get_node_id(edge_to_patch.sender)
         patching_hook = create_edge_patching_hook(
             self.method,
             clean_sender_contributions[(sender_id, i)],
@@ -424,6 +439,7 @@ class ACDC:
             inputs: torch.Tensor,
             i,
             node_to_patch: Node,
+            clean_sender_contributions: Optional = None,
             corrupted_sender_contributions: Optional = None,
             ablated_nodes: Optional[List[Node]] = None
     ) -> torch.Tensor:
@@ -435,20 +451,20 @@ class ACDC:
         # In case of greedy evaluation, check if there are nodes previously ablated and, if so, re-add the hooks for them
         if ablated_nodes and self.mode == "greedy":
             for node in ablated_nodes:
-                sender_id = get_sender_id(node)
+                sender_id = get_node_id(node)
                 hook = create_node_patching_hook(
-                    self.method,
-                    node,
-                    corrupted_sender_contributions[(sender_id, i)] if corrupted_sender_contributions else None
+                    method="pruning",
+                    node=node_to_patch
                 )
                 if hasattr(self.model, 'add_hook'):
                     self.model.add_hook(node.full_activation, hook)
 
         # Create ablation hook
-        sender_id = get_sender_id(node_to_patch)
+        sender_id = get_node_id(node_to_patch)
         patching_hook = create_node_patching_hook(
                     self.method,
                     node_to_patch,
+                    clean_sender_contributions[(sender_id, i)] if clean_sender_contributions else None,
                     corrupted_sender_contributions[(sender_id, i)] if corrupted_sender_contributions else None
                 )
 
@@ -462,32 +478,35 @@ class ACDC:
 
         return patched_logits
 
-    def precompute_sender_contributions(self, clean_caches, corrupted_caches):
-        """Precompute all sender contributions for all examples."""
+    def precompute_node_contributions(self, clean_caches, corrupted_caches):
+        """Precompute all node contributions for all examples."""
 
         for i, example in enumerate(self.dataset):
-            for sender in self.full_graph.nodes:
+            for node in self.full_graph.nodes:
                 # Skip embedding node
-                if "hook_embed" in sender.full_activation:
+                if "hook_embed" in node.full_activation:
                     continue
-                if sender.component_type == "attention":
-                    sender_act = clean_caches[i][sender.full_activation]
-                    sender_act = sender_act[:, :, sender.head_idx, :].to(self.device)
-                    W_O_h = self.model.blocks[sender.layer - 1].attn.W_O[sender.head_idx]
-                    contribution = sender_act @ W_O_h
-                    sender_id = f"L{sender.layer}-Head{sender.head_idx}"
-                    self.clean_sender_contributions[(sender_id, i)] = contribution.to(self.device)
+                if node.component_type == "attention":
+                    sender_act = clean_caches[i][node.full_activation]
+                    clean_contribution = sender_act[:, :, node.head_idx, :].to(self.device)
+                    if self.target == "edge":
+                        W_O_h = self.model.blocks[node.layer - 1].attn.W_O[node.head_idx]
+                        clean_contribution = clean_contribution @ W_O_h
+                    sender_id = f"L{node.layer}-Head{node.head_idx}"
+                    self.clean_sender_contributions[(sender_id, i)] = clean_contribution.to(self.device)
                     if self.method == "patching":
-                        corrupted_sender_act = corrupted_caches[i][sender.full_activation]
-                        corrupted_sender_act = corrupted_sender_act[:, :, sender.head_idx, :].to(self.device)
-                        corrupted_contribution = corrupted_sender_act @ W_O_h
+                        corrupted_sender_act = corrupted_caches[i][node.full_activation]
+                        corrupted_contribution = corrupted_sender_act[:, :, node.head_idx, :].to(self.device)
+                        if self.target == "edge":
+                            W_O_h = self.model.blocks[node.layer - 1].attn.W_O[node.head_idx]
+                            corrupted_contribution = corrupted_contribution @ W_O_h
                         self.corrupted_sender_contributions[(sender_id, i)] = corrupted_contribution.to(self.device)
                 else:
-                    sender_id = f"L{sender.layer}-{sender.name.split('_', 1)[1]}"
-                    contribution = clean_caches[i][sender.full_activation]
+                    sender_id = f"L{node.layer}-{node.name.split('_', 1)[1]}"
+                    contribution = clean_caches[i][node.full_activation]
                     self.clean_sender_contributions[(sender_id, i)] = contribution.to(self.device)
                     if self.method == "patching":
-                        corrupted_contribution = corrupted_caches[i][sender.full_activation]
+                        corrupted_contribution = corrupted_caches[i][node.full_activation]
                         self.corrupted_sender_contributions[(sender_id, i)] = corrupted_contribution.to(self.device)
 
 

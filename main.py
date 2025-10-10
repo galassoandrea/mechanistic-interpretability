@@ -1,6 +1,7 @@
 import torch
 from transformer_lens import HookedTransformer
 from algorithms.ACDC.ACDC import ACDC
+from algorithms.ACDC.utils import load_pruned_model
 from algorithms.AttributionPatching.AttributionPatching import AttributionPatching
 from utilities.evaluation import evaluate_factuality
 from tqdm import tqdm
@@ -22,8 +23,8 @@ def run_circuit_discovery():
 
     # ACDC
     #algorithm = AttributionPatching(model, model_name, task="Factuality", topic="animals")
-    #algorithm = ACDC(model, model_name, task="Factuality", topic="animals", target="edge", mode="greedy", method="patching", threshold=0.05)
-    algorithm = ACDC(model, model_name, task="IOI", target="edge", mode="greedy", method="patching", threshold=0.05)
+    algorithm = ACDC(model, model_name, task="Factuality", topic="animals", target="edge", mode="greedy", method="patching", threshold=0.05)
+    #algorithm = ACDC(model, model_name, task="IOI", target="edge", mode="greedy", method="patching", threshold=0.05)
 
     #all_logits = []
     #all_labels = []
@@ -48,8 +49,8 @@ def run_circuit_discovery():
     # Run ACDC on factuality task
     initial_graph = build_computational_graph(model, model_name)
     circuit = algorithm.discover_circuit()
-    visualize_computational_graph(initial_graph)
-    visualize_computational_graph(circuit)
+    #visualize_computational_graph(initial_graph)
+    #visualize_computational_graph(circuit)
 
 
 if __name__ == "__main__":

@@ -1,3 +1,6 @@
+import json
+import os
+
 import torch
 from typing import Dict, List, Optional, Callable
 from utilities.evaluation import kl_divergence, evaluate_factuality
@@ -25,73 +28,62 @@ def create_edge_patching_hook(
 def create_node_patching_hook(
         method,
         node: Node,
-        corrupted_activation: Optional = None
+        clean_sender_contribution: Optional[torch.Tensor] = None,
+        corrupted_sender_contribution: Optional[torch.Tensor] = None
 ) -> Callable:
     """Create a hook function for node ablation/patching."""
 
     def patching_hook(activation, hook):
-        if method == "patching":
-            patched_activation = corrupted_activation
-            return patched_activation
-        else:
-            # For attention heads, patch only that head's output
-            if node.component_type == "attention":
-                patched_activation = activation
-                patched_activation[:, :, node.head_idx, :] = 0
+        # Check the number of dimensions of the activation
+        if activation.dim() == 4:
+            # Attention layer (hook_z)
+            patched_activation = activation
+            if method == "patching":
+                patched_activation[:,:,node.head_idx,:] = activation[:,:,node.head_idx,:] - clean_sender_contribution + corrupted_sender_contribution
             else:
-                patched_activation = torch.zeros_like(activation)
-            return patched_activation
+                patched_activation[:,:,node.head_idx,:] = 0
+        else:
+            if method == "patching":
+                patched_activation = activation - clean_sender_contribution + corrupted_sender_contribution
+            else:
+                patched_activation = 0
+        return patched_activation
 
     return patching_hook
 
 def add_all_hooks(
         model,
-        method,
         i,
         clean_sender_contributions,
-        corrupted_sender_contributions,
         ablated_nodes: Optional[List[Node]] = None,
         ablated_edges: Optional[List[Edge]] = None):
     """Add hooks for all activations in the circuit."""
     if ablated_edges != [] and ablated_edges is not None:
         for edge in ablated_edges:
-            sender_id = get_sender_id(edge.sender)
-            if method == "patching":
-                hook = create_edge_patching_hook(
-                    method,
-                    clean_sender_contributions[(sender_id,i)],
-                    corrupted_sender_contributions[(sender_id,i)]
-                )
-                if hasattr(model, 'add_hook'):
-                    model.add_hook(edge.receiver.full_activation, hook)
-            else:
-                hook = create_edge_patching_hook(
-                    method,
-                    clean_sender_contributions[(sender_id,i)]
-                )
-                if hasattr(model, 'add_hook'):
-                    model.add_hook(edge.receiver.full_activation, hook)
+            sender_id = get_node_id(edge.sender)
+            hook = create_edge_patching_hook(
+                method="pruning",
+                clean_sender_contribution=clean_sender_contributions[(sender_id,i)]
+            )
+            if hasattr(model, 'add_hook'):
+                model.add_hook(edge.receiver.full_activation, hook)
     if ablated_nodes != [] and ablated_nodes is not None:
-        if method == "patching":
-            for node in ablated_nodes:
-                sender_id = get_sender_id(node)
-                hook = create_node_patching_hook(method, node, corrupted_sender_contributions[(sender_id,i)])
-                if hasattr(model, 'add_hook'):
-                    model.add_hook(node.full_activation, hook)
-        else:
-            for node in ablated_nodes:
-                hook = create_node_patching_hook(method, node)
-                if hasattr(model, 'add_hook'):
-                    model.add_hook(node.full_activation, hook)
+        for node in ablated_nodes:
+            sender_id = get_node_id(node)
+            hook = create_node_patching_hook(
+                method="pruning",
+                node=node,
+                clean_sender_contribution=clean_sender_contributions[(sender_id, i)]
+            )
+            if hasattr(model, 'add_hook'):
+                model.add_hook(node.full_activation, hook)
 
 def get_final_performance(
         model,
-        method,
         dataset,
         task_name,
         clean_logits,
         clean_sender_contributions,
-        corrupted_sender_contributions,
         ablated_nodes: Optional[List[Node]] = None,
         ablated_edges: Optional[List[Edge]] = None
 ):
@@ -105,12 +97,8 @@ def get_final_performance(
         model.reset_hooks()
 
         # Add all hooks for patched edges/nodes
-        if method == "patching":
-            add_all_hooks(model, method, i, clean_sender_contributions, corrupted_sender_contributions,
-                           ablated_nodes, ablated_edges)
-        else:
-            add_all_hooks(model, method, i, clean_sender_contributions, None,
-                           ablated_nodes, ablated_edges)
+        add_all_hooks(model, i, clean_sender_contributions,
+                       ablated_nodes, ablated_edges)
 
         with torch.no_grad():
             ablated_logits = model(example.clean_tokens)
@@ -142,10 +130,10 @@ def filter_hooks(cache, model_name, layers):
         all_hooks.extend(hooks)
     return {k: v.detach().cpu() for k, v in cache.items() if k in all_hooks}
 
-def get_sender_id(node: Node) -> str:
-    """Get the sender ID string for a given node."""
+def get_node_id(node: Node) -> str:
+    """Get the ID string for a given node."""
     if node.component_type == "attention":
-        sender_id = f"L{node.layer}-Head{node.head_idx}"
+        node_id = f"L{node.layer}-Head{node.head_idx}"
     else:
-        sender_id = f"L{node.layer}-{node.name.split('_', 1)[1]}"
-    return sender_id
+        node_id = f"L{node.layer}-{node.name.split('_', 1)[1]}"
+    return node_id
